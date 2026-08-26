@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>편지함 · Gmail AI Inbox</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="deskline"></div>
+<main>
+  <div id="skyBanner" class="sky-banner">
+    <div id="celestial" class="celestial">☀</div>
+    <div class="postmark">
+      <span id="pmDate"></span>
+      <span id="pmTime"></span>
+    </div>
+  </div>
+
+  <section class="quote-card">
+    <svg class="quote-flap" viewBox="0 0 300 30" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M0 0 L150 26 L300 0" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+    <p class="quote-text">“나는 평생 단 하루도 노동을 해 본 적이 없다. 일하는 그 자체가 기쁨이고 즐거움이었다.”</p>
+    <p class="quote-attr">— 토머스 에디슨</p>
+  </section>
+
+  <header>
+    <p class="eyebrow">PRIVATE · READ&nbsp;ONLY</p>
+    <h1><svg class="envelope-icon" viewBox="0 0 48 34" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect x="1" y="1" width="46" height="32" rx="2" fill="none" stroke="currentColor" stroke-width="2.5"/><path d="M2 2 L24 20 L46 2" fill="none" stroke="currentColor" stroke-width="2.5"/></svg>편지함</h1>
+    <p id="status" class="status">연결 상태 확인 중…</p>
+    <div class="actions">
+      <a class="button ghost" href="/auth/google">Gmail 연결</a>
+      <button id="sync" class="button primary">최근 30개 분석</button>
+      <button id="notifyTelegram" class="button ghost">📨 텔레그램 알림 보내기</button>
+      <button id="weeklySummary" class="button ghost">이번 주 요약</button>
+      <button id="styleBtn" class="button ghost">내 답장 스타일</button>
+    </div>
+  </header>
+
+  <section id="reportPanel" class="report-panel" hidden>
+    <div class="report-head">
+      <h2>이번 주 요약</h2>
+      <button id="closeReport" class="close" aria-label="닫기">×</button>
+    </div>
+    <p id="reportText" class="report-text"></p>
+  </section>
+
+  <section id="stylePanel" class="style-panel" hidden>
+    <div class="report-head">
+      <h2>내 답장 스타일</h2>
+      <button id="closeStyle" class="close" aria-label="닫기">×</button>
+    </div>
+    <p class="hint" style="margin-bottom:14px">답장 초안에서 “복사하기”를 누르면 그 메일 유형에 맞춰 자동으로 학습돼요. 예전에 직접 썼던 답장을 유형별로 붙여넣어 미리 가르쳐줄 수도 있어요.</p>
+    <div id="styleCounts" class="chip-list" style="margin-bottom:12px"></div>
+    <label for="styleCategory" class="hint" style="margin:0 0 6px">유형 선택</label>
+    <select id="styleCategory" class="cat-select">
+      <option value="단순질문">단순질문</option>
+      <option value="견적요청">견적요청</option>
+      <option value="현장방문요청">현장방문요청</option>
+      <option value="미팅요청">미팅요청</option>
+      <option value="기타">기타</option>
+    </select>
+    <div class="ask" style="margin-top:10px">
+      <textarea id="styleInput" rows="3" placeholder="선택한 유형에 맞는, 예전에 실제로 보냈던 답장 예시를 붙여넣어보세요"></textarea>
+    </div>
+    <div class="draft-actions" style="justify-content:space-between">
+      <button id="resetStyle" class="button ghost small">전체 초기화</button>
+      <button id="addStyle" class="button primary small">예시 추가</button>
+    </div>
+  </section>
+
+  <section id="summary" class="summary"></section>
+
+  <nav class="tabs" id="tabs">
+    <button class="tab active" data-view="inbox">✉ 편지함</button>
+    <button class="tab" data-view="business">🏢 업무 메일</button>
+    <button class="tab" data-view="calls">📞 통화요약</button>
+    <button class="tab" data-view="schedule">🗓 일정</button>
+    <button class="tab" data-view="vault">💡 아이디어 보관함</button>
+  </nav>
+
+  <section id="view-inbox" class="view">
+    <div id="emails" class="emails"><p class="empty">아직 분석한 메일이 없습니다. “최근 30개 분석”을 눌러보세요.</p></div>
+  </section>
+
+  <section id="view-business" class="view" hidden>
+    <p class="hint" style="margin-bottom:14px">분석된 모든 메일이 유형별로 정리돼요. 여기서 답장을 열면 회사 대표 이메일에 맞게 자세하고 격식 있게 작성돼요.</p>
+    <div id="bizEmails" class="biz-groups"></div>
+  </section>
+
+  <section id="view-calls" class="view" hidden>
+    <p class="hint" style="margin-bottom:14px">에이닷 등 통화 요약 서비스가 보낸 메일만 메모지 형태로 모아뒀어요.</p>
+    <div id="callMemos" class="memo-board"></div>
+  </section>
+
+  <section id="view-schedule" class="view" hidden>
+    <div class="cal-nav">
+      <button id="prevMonth" class="button ghost small" aria-label="이전 달">‹</button>
+      <h3 id="calLabel"></h3>
+      <button id="nextMonth" class="button ghost small" aria-label="다음 달">›</button>
+    </div>
+    <div id="calGrid" class="cal-grid"></div>
+    <div id="schedule" class="schedule"><p class="empty">기한이 있는 메일이 여기 날짜순으로 모입니다.</p></div>
+  </section>
+
+  <section id="view-vault" class="view" hidden>
+    <div id="vault" class="vault"><p class="empty">메일 상세에서 “아이디어 제안받기”를 누르면 여기에 모여요. 사업 제안 메일은 더 넓고 기발한 아이디어로 정리돼요.</p></div>
+  </section>
+</main>
+
+<dialog id="modal">
+  <div class="dialog-flap"></div>
+  <button id="close" class="close" aria-label="닫기">×</button>
+  <p id="meta" class="meta"></p>
+  <h2 id="subject"></h2>
+  <p id="emailSummary" class="lede"></p>
+  <dl id="details"></dl>
+  <hr>
+  <label>이 메일에서 아이디어 얻기</label>
+  <p class="hint">내용을 바탕으로 AI가 다음 행동을 제안해요</p>
+  <button id="getIdeas" class="button ghost small">아이디어 제안받기</button>
+  <ul id="ideasList" class="ideas-list"></ul>
+  <p id="ideasNote" class="draft-status"></p>
+  <hr>
+  <label>답장 초안 작성</label>
+  <p class="hint">AI가 초안을 써드려요 · 🏢 업무용 상세 답장은 확인 후 실제 전송도 가능해요</p>
+  <div class="tones" id="tones">
+    <button class="tone-btn" data-tone="polite">정중하게</button>
+    <button class="tone-btn" data-tone="casual">캐주얼하게</button>
+    <button class="tone-btn" data-tone="short">짧고 간단하게</button>
+    <button class="tone-btn biz-tone" data-tone="business">🏢 업무용 상세</button>
+  </div>
+  <div id="draftBox" class="draft-box" hidden>
+    <p id="costNote" class="cost-note" hidden>⚠ 이 메일은 견적·제안 관련으로 판단되어, AI가 대략적인 비용 추정치를 답장에 포함했어요. 실제 견적과 다를 수 있으니 반드시 확인 후 사용하세요.</p>
+    <textarea id="draftText" rows="7"></textarea>
+    <div class="draft-actions">
+      <button id="redraft" class="button ghost small">다시 쓰기</button>
+      <button id="copyDraft" class="button primary small">복사하기</button>
+    </div>
+    <div id="sendRow" class="draft-actions send-row" hidden>
+      <p class="hint send-warning">⚠ 아래 버튼을 누르면 상대방에게 실제로 이메일이 전송돼요. 내용을 꼭 확인하세요.</p>
+      <button id="sendMail" class="button send small">🚀 실제로 전송하기</button>
+    </div>
+    <p id="draftStatus" class="draft-status"></p>
+  </div>
+  <hr>
+  <label for="question">이 메일에 질문하기</label>
+  <div class="ask">
+    <input id="question" placeholder="예: 내가 해야 할 일은 뭐야?">
+    <button id="ask" class="button primary">질문</button>
+  </div>
+  <p id="answer" class="answer"></p>
+</dialog>
+
+<dialog id="planModal">
+  <div class="dialog-flap"></div>
+  <button id="closePlan" class="close" aria-label="닫기">×</button>
+  <p class="meta">실행 계획표</p>
+  <h2 id="planTitle"></h2>
+  <div id="planSteps" class="plan-steps"></div>
+  <div id="planMaterials" class="plan-extra"></div>
+  <div id="planResources" class="plan-extra"></div>
+  <hr>
+  <label for="planQuestion">이 계획에 질문하기</label>
+  <div class="ask">
+    <input id="planQuestion" placeholder="예: 1단계는 얼마나 걸려?">
+    <button id="planAsk" class="button primary">질문</button>
+  </div>
+  <p id="planAnswer" class="answer"></p>
+</dialog>
+
+<script src="/app.js"></script>
+</body>
+</html>
