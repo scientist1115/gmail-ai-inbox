@@ -5,7 +5,7 @@ import { join, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
-const env = loadEnv(join(root, '.env'));
+const env = { ...loadEnv(join(root, '.env')), ...process.env };
 const port = Number(env.PORT || 3000);
 const dataDir = join(root, 'data');
 const sessions = new Map();
@@ -352,7 +352,4 @@ const server = http.createServer(async (req, res) => {
     const types = { '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript' }; return send(res, 200, readFileSync(full, 'utf8'), types[extname(full)] || 'text/plain');
   } catch (error) { return send(res, 400, { error: error.message || '요청을 처리하지 못했습니다.' }); }
 });
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on port ${PORT}`);
-});
+server.listen(port, () => console.log(`Gmail AI Inbox: http://127.0.0.1:${port}`));
