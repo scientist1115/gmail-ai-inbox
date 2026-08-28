@@ -51,6 +51,21 @@ function partText(part) {
   for (const child of part.parts || []) { const result = partText(child); if (result) return result; }
   return '';
 }
+function collectAttachments(part, out = []) {
+  if (part.filename && part.filename.length > 0 && part.body?.attachmentId) {
+    out.push({ attachmentId: part.body.attachmentId, filename: part.filename, mimeType: part.mimeType || '', size: part.body.size || 0 });
+  }
+  for (const child of part.parts || []) collectAttachments(child, out);
+  return out;
+}
+function normalizeEmailAddress(from) {
+  const m = String(from || '').match(/<([^>]+)>/);
+  return (m ? m[1] : from || '').trim().toLowerCase();
+}
+function extractDisplayName(from) {
+  const m = String(from || '').match(/^([^<]+)</);
+  return m ? m[1].trim().replace(/^["']|["']$/g, '') : normalizeEmailAddress(from);
+}
 function cleanText(text) { return text.replace(/\s+/g, ' ').trim().slice(0, 12000); }
 async function googleToken(params) {
   const body = new URLSearchParams({ client_id: env.GOOGLE_CLIENT_ID, client_secret: env.GOOGLE_CLIENT_SECRET, redirect_uri: env.GOOGLE_REDIRECT_URI, ...params });
@@ -95,7 +110,7 @@ async function syncAndAnalyze(limit) {
   const emails = [];
   for (const item of list.messages || []) {
     const message = await gmail(`messages/${item.id}?format=full`);
-    emails.push({ id: item.id, threadId: message.threadId, from: header(message.payload.headers, 'From'), subject: header(message.payload.headers, 'Subject') || '(제목 없음)', date: header(message.payload.headers, 'Date'), messageIdHeader: header(message.payload.headers, 'Message-ID'), snippet: message.snippet || '', body: cleanText(partText(message.payload)) });
+    emails.push({ id: item.id, threadId: message.threadId, from: header(message.payload.headers, 'From'), fromEmail: normalizeEmailAddress(header(message.payload.headers, 'From')), fromName: extractDisplayName(header(message.payload.headers, 'From')), subject: header(message.payload.headers, 'Subject') || '(제목 없음)', date: header(message.payload.headers, 'Date'), messageIdHeader: header(message.payload.headers, 'Message-ID'), snippet: message.snippet || '', body: cleanText(partText(message.payload)), attachments: collectAttachments(message.payload) });
   }
   const prompt = `당신은 회사 업무용 이메일 비서입니다. 다음 Gmail 메일들을 분석하세요. 각 메일에 대해:\n- importance: important, normal, low 중 하나\n- 한국어 1~2문장 요약(summary), 중요 이유(reason), 필요한 행동(action), 기한(dueDate: 없으면 빈 문자열)\n- isBusinessInquiry: 사업 제안·의뢰·협업·투자·거래 제안 여부(boolean)\n- category: 이 메일의 성격을 "단순질문", "견적요청", "현장방문요청", "미팅요청", "기타" 중 하나로 분류\n- isCallSummary: 통화 요약 서비스(예: 에이닷, AI 전화)가 자동으로 보낸 통화 요약/통화 기록 메일인지 여부(boolean). 발신자나 제목에 "에이닷", "통화 요약", "통화 기록", "AI 전화" 같은 표현이 있으면 true로 판단하세요.\n- isAd: 마케팅 목적의 대량 발송 프로모션, 할인/이벤트 안내, 뉴스레터, 구독 유도, 광고성 스팸 메일인지 여부(boolean). 실제 고객·거래처가 보낸 견적 요청, 업무 문의, 미팅·현장방문 요청, 통화 요약, 사람이 직접 작성한 메일은 광고가 아니므로 반드시 false로 판단하세요. 애매하면 false로 판단하세요.\n- isVerification: 로그인/본인확인/2단계 인증(2FA)/회원가입/비밀번호 재설정 등을 위해 서비스가 자동 발송한 "인증번호" 또는 "인증 코드" 메일인지 여부(boolean). 숫자나 영숫자로 된 일회용 코드가 포함된 메일만 true로 판단하고, 코드 없이 단순히 "인증이 필요합니다" 안내만 있는 업무 메일은 false로 판단하세요.\n- verificationCode: isVerification이 true인 경우 메일 본문에서 찾은 실제 인증 코드/번호 문자열(숫자·영문 조합 그대로). 찾을 수 없거나 isVerification이 false면 빈 문자열.\n광고/뉴스레터는 low, 답장·결제·일정·업무 요청·기한은 중요도를 높게 판단합니다. 반환할 이메일 수와 입력 이메일 수는 반드시 같아야 하며, 각 id를 그대로 사용하세요.\n\n${JSON.stringify(emails)}`;
   const analysisFormat = {
@@ -198,6 +213,53 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.pathname === '/api/sync' && req.method === 'POST') { if (!configReady()) throw new Error(`.env에서 ${missingConfig().join(', ')} 값을 확인하세요.`); const result = await syncAndAnalyze((await requestBody(req)).limit || 30); return send(res, 200, { emails: result.emails, adFilteredCount: result.adFilteredCount }); }
     if (url.pathname === '/api/emails') return send(res, 200, { emails: readJson('emails.json', []) });
+    if (url.pathname === '/api/attachment' && req.method === 'GET') {
+      const messageId = url.searchParams.get('messageId');
+      const attachmentId = url.searchParams.get('attachmentId');
+      const filename = url.searchParams.get('filename') || 'attachment';
+      if (!messageId || !attachmentId) throw new Error('첨부파일 정보가 부족합니다.');
+      const token = await gmailAccessToken();
+      const r = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${messageId}/attachments/${attachmentId}`, { headers: { Authorization: `Bearer ${token}` } });
+      const json = await r.json();
+      if (!r.ok) throw new Error(json.error?.message || '첨부파일을 불러오지 못했습니다.');
+      const buffer = Buffer.from(json.data.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+      res.writeHead(200, {
+        'Content-Type': 'application/octet-stream',
+        'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,
+        'Content-Length': buffer.length,
+        'Cache-Control': 'no-store'
+      });
+      return res.end(buffer);
+    }
+    if (url.pathname === '/api/senders') {
+      const list = readJson('emails.json', []);
+      const groups = new Map();
+      for (const email of list) {
+        if (email.isVerification || email.isCallSummary) continue;
+        const key = email.fromEmail || email.from || '(unknown)';
+        if (!groups.has(key)) groups.set(key, { fromEmail: key, fromName: email.fromName || key, emails: [], attachmentCount: 0, latestDate: '', hasImportant: false });
+        const g = groups.get(key);
+        g.emails.push(email);
+        g.attachmentCount += (email.attachments || []).length;
+        if (!g.latestDate || email.date > g.latestDate) g.latestDate = email.date;
+        if (email.importance === 'important') g.hasImportant = true;
+        if (email.fromName && email.fromName.length > g.fromName.length) g.fromName = email.fromName;
+      }
+      const result = [...groups.values()].sort((a, b) => (a.latestDate < b.latestDate ? 1 : -1));
+      return send(res, 200, { senders: result });
+    }
+    if (url.pathname === '/api/attachments') {
+      const list = readJson('emails.json', []);
+      const attachments = [];
+      for (const email of list) {
+        if (email.isVerification) continue;
+        for (const att of email.attachments || []) {
+          attachments.push({ ...att, messageId: email.id, subject: email.subject, from: email.from, fromEmail: email.fromEmail, fromName: email.fromName, date: email.date, category: email.category });
+        }
+      }
+      attachments.sort((a, b) => (a.date < b.date ? 1 : -1));
+      return send(res, 200, { attachments });
+    }
     if (url.pathname === '/api/chat' && req.method === 'POST') {
       if (!env.OPENAI_API_KEY) throw new Error('.env에 OPENAI_API_KEY를 입력하세요.');
       const { id, question } = await requestBody(req); const email = readJson('emails.json', []).find(x => x.id === id);
