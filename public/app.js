@@ -1,417 +1,543 @@
-import http from 'node:http';
-import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join, extname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+const $ = s => document.querySelector(s);
+let emails = [], selected;
 
-const root = fileURLToPath(new URL('.', import.meta.url));
-const env = { ...loadEnv(join(root, '.env')), ...process.env };
-const port = Number(env.PORT || 3000);
-const dataDir = join(root, 'data');
-const sessions = new Map();
-mkdirSync(dataDir, { recursive: true });
+const esc = s => String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const label = t => t === 'important' ? '중요' : t === 'normal' ? '일반' : '낮음';
 
-function loadEnv(file) {
-  if (!existsSync(file)) return {};
-  return Object.fromEntries(readFileSync(file, 'utf8').split(/\r?\n/)
-    .filter(line => line && !line.trimStart().startsWith('#'))
-    .map(line => { const i = line.indexOf('='); return i < 0 ? [line, ''] : [line.slice(0, i).trim(), line.slice(i + 1).trim()]; }));
+function playFlap(dialogId) {
+  const flap = document.querySelector(`#${dialogId} .dialog-flap`);
+  if (!flap) return;
+  flap.classList.remove('flap-play');
+  requestAnimationFrame(() => requestAnimationFrame(() => flap.classList.add('flap-play')));
 }
-function readJson(name, fallback) {
-  const file = join(dataDir, name);
-  return existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : fallback;
+function updateSky() {
+  const now = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  $('#pmDate').textContent = `${now.getFullYear()}.${pad(now.getMonth() + 1)}.${pad(now.getDate())}`;
+  $('#pmTime').textContent = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
 }
-function saveJson(name, value) { writeFileSync(join(dataDir, name), JSON.stringify(value, null, 2)); }
-function normalizeStyleStore(raw) {
-  if (Array.isArray(raw)) return raw.length ? { '기타': raw } : {};
-  return raw && typeof raw === 'object' ? raw : {};
+updateSky();
+setInterval(updateSky, 1000);
+
+async function api(path, options) {
+  const r = await fetch(path, options);
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error);
+  return data;
 }
-function send(res, status, body, type = 'application/json') {
-  res.writeHead(status, { 'Content-Type': `${type}; charset=utf-8`, 'Cache-Control': 'no-store' });
-  res.end(type === 'application/json' ? JSON.stringify(body) : body);
+
+function mailCard(e, i = 0) {
+  return `<article class="mail ${e.importance}" data-id="${e.id}" style="--stagger:${Math.min(i, 14)}">
+    <div class="badges">
+      <span class="badge">${label(e.importance)}</span>
+      ${e.isCallSummary ? '<span class="badge call-badge">통화요약</span>' : ''}
+      ${e.category && e.category !== '기타' ? `<span class="badge cat-badge">${esc(e.category)}</span>` : ''}
+      ${e.attachments && e.attachments.length ? `<span class="badge attach-badge">📎 ${e.attachments.length}</span>` : ''}
+    </div>
+    <h3>${esc(e.subject)}</h3>
+    <p class="from">${esc(e.from)}</p>
+    <p class="snip">${esc(e.summary || e.snippet)}</p>
+    ${e.dueDate ? `<p class="due">기한 · ${esc(e.dueDate)}</p>` : ''}
+  </article>`;
 }
-function requestBody(req) {
-  return new Promise((resolve, reject) => { let text = ''; req.on('data', c => text += c); req.on('end', () => { try { resolve(text ? JSON.parse(text) : {}); } catch { reject(new Error('JSON 형식이 올바르지 않습니다.')); } }); req.on('error', reject); });
+
+function renderSummary() {
+  const count = t => emails.filter(e => e.importance === t && !e.isVerification).length;
+  $('#summary').innerHTML = ['important', 'normal', 'low'].map(t =>
+    `<div class="seal ${t}"><span class="dot"></span><div><strong>${count(t)}</strong><span>${label(t)}</span></div></div>`
+  ).join('');
 }
-const requiredConfig = ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REDIRECT_URI', 'OPENAI_API_KEY'];
-function missingConfig() { return requiredConfig.filter(key => !env[key]); }
-function configReady() { return missingConfig().length === 0; }
-function cookie(req) { return (req.headers.cookie || '').match(/gmail_ai_session=([^;]+)/)?.[1]; }
-function session(req, res) {
-  let id = cookie(req); if (!id || !sessions.has(id)) { id = randomBytes(24).toString('hex'); sessions.set(id, {}); res.setHeader('Set-Cookie', `gmail_ai_session=${id}; HttpOnly; SameSite=Lax; Path=/`); }
-  return sessions.get(id);
+
+function renderInbox() {
+  const list = emails.filter(e => !e.isVerification);
+  $('#emails').innerHTML = list.length
+    ? list.map((e, i) => mailCard(e, i)).join('')
+    : '<p class="empty">아직 분석한 메일이 없습니다. "최근 30개 분석"을 눌러보세요.</p>';
 }
-function b64url(value) { return Buffer.from(value.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'); }
-function b64urlEncode(value) { return Buffer.from(value, 'utf8').toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
-function extractEmailAddress(from) { const m = String(from || '').match(/<([^>]+)>/); return (m ? m[1] : from || '').trim(); }
-function encodeSubjectHeader(subject) { return `=?UTF-8?B?${Buffer.from(subject, 'utf8').toString('base64')}?=`; }
-function header(headers, name) { return headers.find(h => h.name.toLowerCase() === name.toLowerCase())?.value || ''; }
-function partText(part) {
-  if (part.mimeType === 'text/plain' && part.body?.data) return b64url(part.body.data);
-  for (const child of part.parts || []) { const result = partText(child); if (result) return result; }
-  return '';
+
+let calMonth = new Date(); calMonth.setDate(1);
+
+function parseDue(str) {
+  const t = Date.parse(str);
+  return isNaN(t) ? null : new Date(t);
 }
-function collectAttachments(part, out = []) {
-  if (part.filename && part.filename.length > 0 && part.body?.attachmentId) {
-    out.push({ attachmentId: part.body.attachmentId, filename: part.filename, mimeType: part.mimeType || '', size: part.body.size || 0 });
+function dayKey(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
+
+function renderCalendarGrid() {
+  const y = calMonth.getFullYear(), m = calMonth.getMonth();
+  $('#calLabel').textContent = `${y}년 ${m + 1}월`;
+  const dueMap = new Map();
+  emails.filter(e => !e.isVerification).forEach(e => { const d = parseDue(e.dueDate); if (d) { const k = dayKey(d); dueMap.set(k, (dueMap.get(k) || 0) + 1); } });
+  const first = new Date(y, m, 1);
+  const startOffset = first.getDay();
+  const totalDays = new Date(y, m + 1, 0).getDate();
+  const todayKey = dayKey(new Date());
+  let html = ['일', '월', '화', '수', '목', '금', '토'].map(d => `<div class="cal-dow">${d}</div>`).join('');
+  for (let i = 0; i < startOffset; i++) html += '<div class="cal-cell empty-cell"></div>';
+  for (let d = 1; d <= totalDays; d++) {
+    const k = dayKey(new Date(y, m, d));
+    const count = dueMap.get(k) || 0;
+    html += `<div class="cal-cell${count ? ' has-due' : ''}${k === todayKey ? ' today' : ''}" data-day="${k}">
+      <span class="cal-daynum">${d}</span>
+      ${count ? `<span class="cal-dot">${count}</span>` : ''}
+    </div>`;
   }
-  for (const child of part.parts || []) collectAttachments(child, out);
-  return out;
-}
-function normalizeEmailAddress(from) {
-  const m = String(from || '').match(/<([^>]+)>/);
-  return (m ? m[1] : from || '').trim().toLowerCase();
-}
-function extractDisplayName(from) {
-  const m = String(from || '').match(/^([^<]+)</);
-  return m ? m[1].trim().replace(/^["']|["']$/g, '') : normalizeEmailAddress(from);
-}
-function cleanText(text) { return text.replace(/\s+/g, ' ').trim().slice(0, 12000); }
-async function googleToken(params) {
-  const body = new URLSearchParams({ client_id: env.GOOGLE_CLIENT_ID, client_secret: env.GOOGLE_CLIENT_SECRET, redirect_uri: env.GOOGLE_REDIRECT_URI, ...params });
-  const r = await fetch('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body });
-  const json = await r.json(); if (!r.ok) throw new Error(json.error_description || 'Google 인증에 실패했습니다.'); return json;
-}
-async function gmailAccessToken() {
-  const tokens = readJson('tokens.json', null); if (!tokens?.refresh_token) throw new Error('Gmail 연결이 필요합니다.');
-  const refreshed = await googleToken({ grant_type: 'refresh_token', refresh_token: tokens.refresh_token });
-  return refreshed.access_token;
-}
-async function gmail(path) {
-  const token = await gmailAccessToken();
-  const r = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/${path}`, { headers: { Authorization: `Bearer ${token}` } });
-  const json = await r.json(); if (!r.ok) throw new Error(json.error?.message || 'Gmail을 불러오지 못했습니다.'); return json;
-}
-async function gmailSendMessage(raw, threadId) {
-  const token = await gmailAccessToken();
-  const r = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ raw, threadId })
+  $('#calGrid').innerHTML = html;
+  document.querySelectorAll('.cal-cell.has-due').forEach(cell => {
+    cell.onclick = () => {
+      const target = document.querySelector(`[data-daygroup="${cell.dataset.day}"]`);
+      if (target) target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    };
   });
-  const json = await r.json();
-  if (!r.ok) throw new Error(json.error?.message || 'Gmail 전송에 실패했습니다.');
-  return json;
 }
-async function openai(prompt, format, model) {
-  const text = format ? { format } : { verbosity: 'medium' };
-  const r = await fetch('https://api.openai.com/v1/responses', { method: 'POST', headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ model: model || env.OPENAI_MODEL || 'gpt-5.6-terra', input: prompt, text }) });
-  const json = await r.json();
-  if (!r.ok) throw new Error(json.error?.message || 'AI 분석 요청에 실패했습니다.');
-  const extracted = (json.output || []).flatMap(item => item.content || []).map(content => {
-    if (content.type === 'refusal') throw new Error(`AI가 요청을 거절했습니다: ${content.refusal}`);
-    return content.type === 'output_text' ? content.text : '';
-  }).join('');
-  return json.output_text || extracted;
+
+function renderSchedule() {
+  renderCalendarGrid();
+  const pool = emails.filter(e => !e.isVerification);
+  const withDue = pool.filter(e => parseDue(e.dueDate));
+  const noDate = pool.filter(e => e.dueDate && !parseDue(e.dueDate));
+  if (!withDue.length && !noDate.length) {
+    $('#schedule').innerHTML = '<p class="empty">기한이 있는 메일이 여기 날짜순으로 모입니다.</p>';
+    return;
+  }
+  const groups = new Map();
+  for (const e of withDue) { const k = dayKey(parseDue(e.dueDate)); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(e); }
+  const dates = [...groups.keys()].sort();
+  let html = dates.map(k =>
+    `<div class="day-group" data-daygroup="${k}"><h4>${esc(k)}</h4><div class="emails">${groups.get(k).map((e, i) => mailCard(e, i)).join('')}</div></div>`
+  ).join('');
+  if (noDate.length) html += `<div class="day-group"><h4>날짜 확인 필요</h4><div class="emails">${noDate.map((e, i) => mailCard(e, i)).join('')}</div></div>`;
+  $('#schedule').innerHTML = html;
 }
-function parseJson(text) { const match = text.match(/\{[\s\S]*\}|\[[\s\S]*\]/); if (!match) throw new Error('AI가 올바른 형식으로 응답하지 않았습니다.'); return JSON.parse(match[0]); }
-async function syncAndAnalyze(limit) {
-  const list = await gmail(`messages?maxResults=${Math.min(Math.max(limit, 1), 30)}&q=${encodeURIComponent('in:inbox')}`);
-  const emails = [];
-  for (const item of list.messages || []) {
-    const message = await gmail(`messages/${item.id}?format=full`);
-    emails.push({ id: item.id, threadId: message.threadId, from: header(message.payload.headers, 'From'), fromEmail: normalizeEmailAddress(header(message.payload.headers, 'From')), fromName: extractDisplayName(header(message.payload.headers, 'From')), subject: header(message.payload.headers, 'Subject') || '(제목 없음)', date: header(message.payload.headers, 'Date'), messageIdHeader: header(message.payload.headers, 'Message-ID'), snippet: message.snippet || '', body: cleanText(partText(message.payload)), attachments: collectAttachments(message.payload) });
-  }
-  const prompt = `당신은 회사 업무용 이메일 비서입니다. 다음 Gmail 메일들을 분석하세요. 각 메일에 대해:\n- importance: important, normal, low 중 하나\n- 한국어 1~2문장 요약(summary), 중요 이유(reason), 필요한 행동(action), 기한(dueDate: 없으면 빈 문자열)\n- isBusinessInquiry: 사업 제안·의뢰·협업·투자·거래 제안 여부(boolean)\n- category: 이 메일의 성격을 "단순질문", "견적요청", "현장방문요청", "미팅요청", "기타" 중 하나로 분류\n- isCallSummary: 통화 요약 서비스(예: 에이닷, AI 전화)가 자동으로 보낸 통화 요약/통화 기록 메일인지 여부(boolean). 발신자나 제목에 "에이닷", "통화 요약", "통화 기록", "AI 전화" 같은 표현이 있으면 true로 판단하세요.\n- isAd: 마케팅 목적의 대량 발송 프로모션, 할인/이벤트 안내, 뉴스레터, 구독 유도, 광고성 스팸 메일인지 여부(boolean). 실제 고객·거래처가 보낸 견적 요청, 업무 문의, 미팅·현장방문 요청, 통화 요약, 사람이 직접 작성한 메일은 광고가 아니므로 반드시 false로 판단하세요. 애매하면 false로 판단하세요.\n- isVerification: 로그인/본인확인/2단계 인증(2FA)/회원가입/비밀번호 재설정 등을 위해 서비스가 자동 발송한 "인증번호" 또는 "인증 코드" 메일인지 여부(boolean). 숫자나 영숫자로 된 일회용 코드가 포함된 메일만 true로 판단하고, 코드 없이 단순히 "인증이 필요합니다" 안내만 있는 업무 메일은 false로 판단하세요.\n- verificationCode: isVerification이 true인 경우 메일 본문에서 찾은 실제 인증 코드/번호 문자열(숫자·영문 조합 그대로). 찾을 수 없거나 isVerification이 false면 빈 문자열.\n광고/뉴스레터는 low, 답장·결제·일정·업무 요청·기한은 중요도를 높게 판단합니다. 반환할 이메일 수와 입력 이메일 수는 반드시 같아야 하며, 각 id를 그대로 사용하세요.\n\n${JSON.stringify(emails)}`;
-  const analysisFormat = {
-    type: 'json_schema', name: 'email_analysis', strict: true,
-    schema: {
-      type: 'object', additionalProperties: false, required: ['emails'],
-      properties: { emails: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['id', 'importance', 'summary', 'reason', 'action', 'dueDate', 'isBusinessInquiry', 'category', 'isCallSummary', 'isAd', 'isVerification', 'verificationCode'], properties: {
-        id: { type: 'string' }, importance: { type: 'string', enum: ['important', 'normal', 'low'] }, summary: { type: 'string' }, reason: { type: 'string' }, action: { type: 'string' }, dueDate: { type: 'string' }, isBusinessInquiry: { type: 'boolean' },
-        category: { type: 'string', enum: ['단순질문', '견적요청', '현장방문요청', '미팅요청', '기타'] }, isCallSummary: { type: 'boolean' }, isAd: { type: 'boolean' }, isVerification: { type: 'boolean' }, verificationCode: { type: 'string' }
-      } } }
-    }
-    }
-  };
-  const analyses = parseJson(await openai(prompt, analysisFormat)).emails;
-  const byId = new Map(analyses.map(a => [a.id, a]));
-  const merged = emails.map(email => ({ ...email, ...(byId.get(email.id) || { importance: 'normal', summary: email.snippet, reason: '', action: '', dueDate: '', isBusinessInquiry: false, category: '기타', isCallSummary: false, isAd: false, isVerification: false, verificationCode: '' }), analyzedAt: new Date().toISOString() }));
-  const stored = merged.filter(email => !email.isAd);
-  const adFilteredCount = merged.length - stored.length;
-  saveJson('emails.json', stored);
-  return { emails: stored, adFilteredCount };
+
+$('#prevMonth').onclick = () => { calMonth.setMonth(calMonth.getMonth() - 1); renderCalendarGrid(); };
+$('#nextMonth').onclick = () => { calMonth.setMonth(calMonth.getMonth() + 1); renderCalendarGrid(); };
+
+function renderBiz() {
+  const cats = ['견적요청', '현장방문요청', '미팅요청', '단순질문', '기타'];
+  const pool = emails.filter(e => !e.isVerification);
+  const groups = cats.map(c => ({ c, list: pool.filter(e => (e.category || '기타') === c) })).filter(g => g.list.length);
+  $('#bizEmails').innerHTML = groups.length
+    ? groups.map(g => `<div class="biz-group"><h4>${esc(g.c)} · ${g.list.length}건</h4><div class="emails">${g.list.map((e, i) => mailCard(e, i)).join('')}</div></div>`).join('')
+    : '<p class="empty">아직 분석한 메일이 없습니다. "최근 30개 분석"을 눌러보세요.</p>';
+  document.querySelectorAll('#bizEmails .mail').forEach(el => el.onclick = () => openMail(el.dataset.id, true));
 }
-function telegramReady() { return Boolean(env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID); }
-function notifySyncResult(stored) {
-  if (!stored.length) { notifyTelegram('📥 새로 분석할 메일이 없어요.'); return; }
-  const urgent = stored.filter(e => e.importance === 'important' && !e.isCallSummary);
-  const calls = stored.filter(e => e.isCallSummary);
-  const routineCount = stored.length - urgent.length - calls.length;
-  if (urgent.length) {
-    const lines = urgent.map(e => `🔴 ${e.subject}\n   ${e.summary}${e.dueDate ? `\n   ⏰ 기한: ${e.dueDate}` : ''}`).join('\n\n');
-    notifyTelegram(`🚨 긴급! 확인이 필요한 메일 ${urgent.length}건\n\n${lines}`);
-  }
-  if (calls.length) {
-    const lines = calls.map(e => `☎ ${e.subject}\n   ${e.summary}`).join('\n\n');
-    notifyTelegram(`📞 통화 요약 메일 ${calls.length}건 도착 — "전화 요약" 탭에 정리했어요\n\n${lines}`);
-  }
-  if (routineCount > 0) {
-    notifyTelegram(`📥 일반 메일 ${routineCount}건 분석 완료 (급하게 확인할 건 없어요)`);
-  }
+
+function authCard(e, i = 0) {
+  return `<article class="auth-card" data-id="${e.id}" style="--stagger:${Math.min(i, 14)}">
+    <div class="auth-code-box">
+      <span class="auth-code-label">CODE</span>
+      <span class="auth-code-value">${esc(e.verificationCode || '—')}</span>
+    </div>
+    <div class="auth-body">
+      <h3>${esc(e.subject)}</h3>
+      <p class="from">${esc(e.from)} · ${esc(e.date)}</p>
+      <p class="snip">${esc(e.summary || e.snippet)}</p>
+    </div>
+    <button class="button ghost small copy-code-btn" data-code="${esc(e.verificationCode || '')}" ${e.verificationCode ? '' : 'disabled'}>코드 복사</button>
+  </article>`;
 }
-async function notifyTelegram(text) {
-  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return;
+
+function renderAuth() {
+  const list = emails.filter(e => e.isVerification);
+  $('#authEmails').innerHTML = list.length
+    ? list.map((e, i) => authCard(e, i)).join('')
+    : '<p class="empty">아직 도착한 인증코드 메일이 없어요. 분석 시 자동으로 여기에 모여요.</p>';
+}
+document.addEventListener('click', async e => {
+  const btn = e.target.closest('.copy-code-btn');
+  if (!btn || btn.disabled) return;
   try {
-    await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: env.TELEGRAM_CHAT_ID, text })
-    });
-  } catch { /* 알림 실패는 조용히 무시 */ }
-}
-function requestFormBody(req) {
-  return new Promise((resolve, reject) => { let text = ''; req.on('data', c => text += c); req.on('end', () => { try { resolve(Object.fromEntries(new URLSearchParams(text))); } catch { reject(new Error('요청을 읽지 못했습니다.')); } }); req.on('error', reject); });
-}
-function passwordRequired() { return Boolean(env.APP_PASSWORD); }
-function loginPage(showError) {
-  return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>로그인 · 업무 편지함</title>
-<style>
-body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(180deg,#101a2e,#182543);font-family:system-ui,sans-serif}
-.box{background:#fffef9;border-radius:6px;padding:36px 32px;width:min(340px,90vw);box-shadow:0 20px 50px rgba(16,26,46,.35);text-align:center}
-h1{font-size:1.3rem;margin:0 0 6px;color:#101a2e}
-p{font-size:.85rem;color:#5f6678;margin:0 0 20px}
-input{width:100%;padding:11px 12px;border:1px solid #d9cca4;border-radius:4px;font-size:.95rem;box-sizing:border-box;margin-bottom:12px}
-button{width:100%;padding:11px;border:none;border-radius:4px;background:#101a2e;color:#fffef9;font-weight:600;font-size:.9rem;cursor:pointer}
-button:hover{background:#182543}
-.err{color:#7c2d3a;font-size:.82rem;margin:0 0 12px;min-height:1em}
-</style></head><body>
-<form class="box" method="post" action="/login">
-<h1>업무 편지함</h1>
-<p>비밀번호를 입력하세요</p>
-<p class="err">${showError ? '비밀번호가 올바르지 않습니다.' : ''}</p>
-<input type="password" name="password" autofocus>
-<button type="submit">입장</button>
-</form>
-</body></html>`;
-}
-const server = http.createServer(async (req, res) => {
-  try {
-    const url = new URL(req.url, `http://${req.headers.host}`); const s = session(req, res);
-    if (url.pathname === '/login' && req.method === 'GET') return send(res, 200, loginPage(url.searchParams.get('error')), 'text/html');
-    if (url.pathname === '/login' && req.method === 'POST') {
-      const { password } = await requestFormBody(req);
-      if (passwordRequired() && password === env.APP_PASSWORD) { s.authed = true; res.writeHead(302, { Location: '/' }); return res.end(); }
-      res.writeHead(302, { Location: '/login?error=1' }); return res.end();
-    }
-    if (url.pathname === '/logout') { s.authed = false; res.writeHead(302, { Location: '/login' }); return res.end(); }
-    if (passwordRequired() && !s.authed) {
-      if (req.method === 'GET' && !url.pathname.startsWith('/api')) { res.writeHead(302, { Location: '/login' }); return res.end(); }
-      return send(res, 401, { error: '로그인이 필요합니다.' });
-    }
-    if (url.pathname === '/api/status') return send(res, 200, { configReady: configReady(), missingConfig: missingConfig(), gmailConnected: Boolean(readJson('tokens.json', null)?.refresh_token) });
-    if (url.pathname === '/auth/google') {
-      if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET || !env.GOOGLE_REDIRECT_URI) throw new Error('.env에 Google OAuth 설정을 입력하세요.');
-      s.oauthState = randomBytes(20).toString('hex');
-      const p = new URLSearchParams({ client_id: env.GOOGLE_CLIENT_ID, redirect_uri: env.GOOGLE_REDIRECT_URI, response_type: 'code', scope: 'https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send', access_type: 'offline', prompt: 'consent', state: s.oauthState });
-      res.writeHead(302, { Location: `https://accounts.google.com/o/oauth2/v2/auth?${p}` }); return res.end();
-    }
-    if (url.pathname === '/auth/google/callback') {
-      if (!url.searchParams.get('code') || url.searchParams.get('state') !== s.oauthState) throw new Error('Google 로그인 상태를 확인하지 못했습니다. 다시 시도하세요.');
-      const tokens = await googleToken({ code: url.searchParams.get('code'), grant_type: 'authorization_code' });
-      const previous = readJson('tokens.json', {}); saveJson('tokens.json', { refresh_token: tokens.refresh_token || previous.refresh_token, connectedAt: new Date().toISOString() });
-      res.writeHead(302, { Location: '/' }); return res.end();
-    }
-    if (url.pathname === '/api/sync' && req.method === 'POST') { if (!configReady()) throw new Error(`.env에서 ${missingConfig().join(', ')} 값을 확인하세요.`); const result = await syncAndAnalyze((await requestBody(req)).limit || 30); return send(res, 200, { emails: result.emails, adFilteredCount: result.adFilteredCount }); }
-    if (url.pathname === '/api/emails') return send(res, 200, { emails: readJson('emails.json', []) });
-    if (url.pathname === '/api/attachment' && req.method === 'GET') {
-      const messageId = url.searchParams.get('messageId');
-      const attachmentId = url.searchParams.get('attachmentId');
-      const filename = url.searchParams.get('filename') || 'attachment';
-      if (!messageId || !attachmentId) throw new Error('첨부파일 정보가 부족합니다.');
-      const token = await gmailAccessToken();
-      const r = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${messageId}/attachments/${attachmentId}`, { headers: { Authorization: `Bearer ${token}` } });
-      const json = await r.json();
-      if (!r.ok) throw new Error(json.error?.message || '첨부파일을 불러오지 못했습니다.');
-      const buffer = Buffer.from(json.data.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
-      res.writeHead(200, {
-        'Content-Type': 'application/octet-stream',
-        'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,
-        'Content-Length': buffer.length,
-        'Cache-Control': 'no-store'
-      });
-      return res.end(buffer);
-    }
-    if (url.pathname === '/api/senders') {
-      const list = readJson('emails.json', []);
-      const groups = new Map();
-      for (const email of list) {
-        if (email.isVerification || email.isCallSummary) continue;
-        const key = email.fromEmail || email.from || '(unknown)';
-        if (!groups.has(key)) groups.set(key, { fromEmail: key, fromName: email.fromName || key, emails: [], attachmentCount: 0, latestDate: '', hasImportant: false });
-        const g = groups.get(key);
-        g.emails.push(email);
-        g.attachmentCount += (email.attachments || []).length;
-        if (!g.latestDate || email.date > g.latestDate) g.latestDate = email.date;
-        if (email.importance === 'important') g.hasImportant = true;
-        if (email.fromName && email.fromName.length > g.fromName.length) g.fromName = email.fromName;
-      }
-      const result = [...groups.values()].sort((a, b) => (a.latestDate < b.latestDate ? 1 : -1));
-      return send(res, 200, { senders: result });
-    }
-    if (url.pathname === '/api/attachments') {
-      const list = readJson('emails.json', []);
-      const attachments = [];
-      for (const email of list) {
-        if (email.isVerification) continue;
-        for (const att of email.attachments || []) {
-          attachments.push({ ...att, messageId: email.id, subject: email.subject, from: email.from, fromEmail: email.fromEmail, fromName: email.fromName, date: email.date, category: email.category });
-        }
-      }
-      attachments.sort((a, b) => (a.date < b.date ? 1 : -1));
-      return send(res, 200, { attachments });
-    }
-    if (url.pathname === '/api/chat' && req.method === 'POST') {
-      if (!env.OPENAI_API_KEY) throw new Error('.env에 OPENAI_API_KEY를 입력하세요.');
-      const { id, question } = await requestBody(req); const email = readJson('emails.json', []).find(x => x.id === id);
-      if (!email || !question) throw new Error('메일 또는 질문이 없습니다.');
-      const answer = await openai(`아래 이메일 내용만 근거로 사용자의 질문에 한국어로 답하세요. 메일에 없는 사실은 모른다고 말하세요.\n\n이메일: ${JSON.stringify(email)}\n\n질문: ${question}`);
-      return send(res, 200, { answer });
-    }
-    if (url.pathname === '/api/style' && req.method === 'GET') {
-      const store = normalizeStyleStore(readJson('style-samples.json', {}));
-      return send(res, 200, { store });
-    }
-    if (url.pathname === '/api/style' && req.method === 'POST') {
-      const { text, category } = await requestBody(req);
-      const trimmed = (text || '').trim();
-      const store = normalizeStyleStore(readJson('style-samples.json', {}));
-      if (trimmed.length >= 10) {
-        const key = category || '기타';
-        if (!store[key]) store[key] = [];
-        store[key].push(trimmed.slice(0, 1200));
-        while (store[key].length > 15) store[key].shift();
-        saveJson('style-samples.json', store);
-      }
-      return send(res, 200, { store });
-    }
-    if (url.pathname === '/api/style/reset' && req.method === 'POST') {
-      saveJson('style-samples.json', {});
-      return send(res, 200, { store: {} });
-    }
-    if (url.pathname === '/api/draft' && req.method === 'POST') {
-      if (!env.OPENAI_API_KEY) throw new Error('.env에 OPENAI_API_KEY를 입력하세요.');
-      const { id, tone } = await requestBody(req); const email = readJson('emails.json', []).find(x => x.id === id);
-      if (!email) throw new Error('메일을 찾을 수 없습니다.');
-      const toneMap = { polite: '정중하고 예의 바른', casual: '편안하고 자연스러운 구어체', short: '군더더기 없이 간결하고 짧은', business: '회사를 대표해 보내는, 격식 있고 정중하며 필요한 배경 설명과 세부사항을 충분히 담은 상세하고 긴' };
-      const style = toneMap[tone] || toneMap.polite;
-      const category = email.category || '기타';
-      const store = normalizeStyleStore(readJson('style-samples.json', {}));
-      const samples = (store[category] || []).slice(-5);
-      const styleNote = samples.length
-        ? `\n\n참고: 아래는 "${category}" 유형 메일에 사용자가 평소 실제로 쓰던 답장 예시입니다. 예시의 구체적 내용(사람 이름, 사실관계 등)은 절대 가져오지 말고, 말투·인사말과 맺음말 습관·문장 길이·어미 스타일만 참고해 지금 답장에 자연스럽게 녹여내세요.\n${samples.map((s, i) => `예시 ${i + 1}: ${s}`).join('\n')}`
-        : '';
-      const costNote = (category === '견적요청' || /제안서|견적/.test(email.subject + email.body))
-        ? `\n\n이 메일은 견적·제안 관련 요청입니다. 메일 내용을 바탕으로 대략적인 예상 비용 범위를 답장 끝부분에 한 문단으로 포함하세요. 반드시 "정확한 금액이 아닌 AI의 대략적인 추정치이며, 실제 견적은 별도 확인이 필요합니다"라는 안내 문구를 함께 넣으세요. 근거가 부족하면 추정하기 어렵다고 솔직히 말하세요.`
-        : '';
-      const lengthNote = tone === 'business'
-        ? `\n\n이 메일 유형은 "${category}"입니다. 유형에 맞는 항목(예: 견적요청이면 견적 범위·조건, 현장방문요청이면 방문 가능 일정과 준비사항, 미팅요청이면 가능한 일정과 안건, 단순질문이면 질문에 대한 명확하고 충분한 답)을 구체적으로 짚어 문단을 나누어 작성하세요. 두괄식으로 핵심을 먼저 말한 뒤 세부 내용을 이어가세요.`
-        : '';
-      const draft = await openai(`당신은 회사 업무용 이메일 답장 초안만 작성하는 비서입니다. 실제로 메일을 보내지는 않습니다. 아래 원본 이메일에 대한 답장을 한국어로, ${style} 톤으로 작성하세요. 자연스러운 인사말과 맺음말을 포함하되 과장하지 마세요. 발신자 이름 자리에는 "[이름]" 이라고 표시하세요. 답장 본문만 출력하고 다른 설명은 덧붙이지 마세요.${styleNote}${costNote}${lengthNote}\n\n원본 이메일: ${JSON.stringify(email)}`, null, 'gpt-4o-mini');
-      const bodyForAlert = draft.length > 3500 ? draft.slice(0, 3500) + '\n…(내용이 길어 일부 생략됨)' : draft;
-      notifyTelegram(`✍️ 답장 초안이 준비됐어요\n\n📧 제목: ${email.subject}\n👤 보낸사람: ${email.from}\n🏷️ 유형: ${category}\n\n${bodyForAlert}`);
-      return send(res, 200, { draft, category });
-    }
-    if (url.pathname === '/api/send' && req.method === 'POST') {
-      const { id, body } = await requestBody(req);
-      const email = readJson('emails.json', []).find(x => x.id === id);
-      if (!email) throw new Error('메일을 찾을 수 없습니다.');
-      const text = (body || '').trim();
-      if (!text) throw new Error('보낼 내용이 비어 있습니다.');
-      const toAddress = extractEmailAddress(email.from);
-      if (!toAddress) throw new Error('받는 사람 주소를 확인할 수 없습니다.');
-      const subject = /^re:/i.test(email.subject || '') ? email.subject : `Re: ${email.subject || ''}`;
-      const headerLines = [
-        `To: ${toAddress}`,
-        `Subject: ${encodeSubjectHeader(subject)}`,
-      ];
-      if (email.messageIdHeader) { headerLines.push(`In-Reply-To: ${email.messageIdHeader}`, `References: ${email.messageIdHeader}`); }
-      headerLines.push('MIME-Version: 1.0', 'Content-Type: text/plain; charset="UTF-8"', 'Content-Transfer-Encoding: base64', '', Buffer.from(text, 'utf8').toString('base64'));
-      const raw = b64urlEncode(headerLines.join('\r\n'));
-      await gmailSendMessage(raw, email.threadId);
-      notifyTelegram(`📤 답장을 실제로 전송했어요\n\n📧 제목: ${subject}\n👤 받는사람: ${toAddress}`);
-      return send(res, 200, { sent: true });
-    }
-    if (url.pathname === '/api/notify-telegram' && req.method === 'POST') {
-      if (!telegramReady()) throw new Error('.env에 TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID를 입력하세요.');
-      const stored = readJson('emails.json', []);
-      if (!stored.length) throw new Error('먼저 "최근 30개 분석"으로 메일을 분석하세요.');
-      notifySyncResult(stored);
-      return send(res, 200, { sent: true });
-    }
-    if (url.pathname === '/api/weekly-summary' && req.method === 'POST') {
-      if (!env.OPENAI_API_KEY) throw new Error('.env에 OPENAI_API_KEY를 입력하세요.');
-      const emails = readJson('emails.json', []);
-      if (!emails.length) throw new Error('먼저 메일을 분석하세요.');
-      const report = await openai(`당신은 개인 이메일 비서입니다. 아래 분석된 메일 목록을 바탕으로 한국어 주간 요약 리포트를 작성하세요. 중요 메일과 마감일이 있는 항목을 우선적으로 짧은 문단이나 불릿으로 정리하고, 광고성/뉴스레터는 한두 줄로 가볍게 언급하세요. 전체 200~350자 내외로 작성하세요.\n\n메일 목록: ${JSON.stringify(emails)}`);
-      return send(res, 200, { report });
-    }
-    if (url.pathname === '/api/ideas' && req.method === 'POST') {
-      if (!env.OPENAI_API_KEY) throw new Error('.env에 OPENAI_API_KEY를 입력하세요.');
-      const { id } = await requestBody(req); const email = readJson('emails.json', []).find(x => x.id === id);
-      if (!email) throw new Error('메일을 찾을 수 없습니다.');
-      const isBiz = Boolean(email.isBusinessInquiry);
-      const styleStore = normalizeStyleStore(readJson('style-samples.json', {}));
-      const samples = (styleStore[email.category || '기타'] || []).slice(-5);
-      const styleNote = samples.length
-        ? `\n\n참고: 아래는 사용자가 평소에 실제로 쓰던 답장 예시입니다. 예시의 구체적 내용은 가져오지 말고, 평소 사고방식·관심사·표현 습관만 가볍게 참고하세요.\n${samples.map((s, i) => `예시 ${i + 1}: ${s}`).join('\n')}`
-        : '';
-      const ideasFormat = {
-        type: 'json_schema', name: 'email_ideas', strict: true,
-        schema: { type: 'object', additionalProperties: false, required: ['ideas'],
-          properties: { ideas: { type: 'array', items: { type: 'string' } } } }
-      };
-      const prompt = isBiz
-        ? `아래 이메일은 사업 제안·의뢰·협업·투자 관련 요청입니다. 이 내용을 바탕으로 넓고 기발한 사업 아이디어를 한국어로 5~7개 제안하세요. 단순 답장 행동이 아니라, 새로운 수익 모델, 협업 확장 방향, 파생 사업 기회, 차별화 포인트처럼 창의적이고 대담한 아이디어를 포함하세요. 각 항목은 한 문장으로 구체적으로 작성하세요.${styleNote}\n\n이메일: ${JSON.stringify(email)}`
-        : `아래 이메일 내용을 읽고, 사용자가 참고할 만한 구체적인 아이디어나 다음 행동을 한국어로 3~5개 제안하세요. 각 항목은 한 문장으로, 실행 가능하고 구체적으로 작성하세요. 이메일 내용과 무관한 일반론은 쓰지 마세요.${styleNote}\n\n이메일: ${JSON.stringify(email)}`;
-      const ideas = parseJson(await openai(prompt, ideasFormat)).ideas;
-      const vault = readJson('ideas.json', {});
-      vault[id] = { ideas, isBusinessInquiry: isBiz, subject: email.subject, from: email.from, generatedAt: new Date().toISOString() };
-      saveJson('ideas.json', vault);
-      return send(res, 200, { ideas, isBusinessInquiry: isBiz });
-    }
-    if (url.pathname === '/api/idea-plan' && req.method === 'POST') {
-      if (!env.OPENAI_API_KEY) throw new Error('.env에 OPENAI_API_KEY를 입력하세요.');
-      const { id, idea } = await requestBody(req);
-      const email = readJson('emails.json', []).find(x => x.id === id);
-      if (!email || !idea) throw new Error('메일 또는 아이디어를 찾을 수 없습니다.');
-      const vault = readJson('ideas.json', {});
-      if (!vault[id]) vault[id] = { ideas: [], isBusinessInquiry: false, subject: email.subject, from: email.from, generatedAt: new Date().toISOString() };
-      if (!vault[id].plans) vault[id].plans = {};
-      if (vault[id].plans[idea]) return send(res, 200, { ...vault[id].plans[idea], cached: true });
-      const planFormat = {
-        type: 'json_schema', name: 'idea_plan', strict: true,
-        schema: { type: 'object', additionalProperties: false, required: ['steps', 'materials', 'resources'],
-          properties: {
-            steps: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['title', 'description', 'timeframe'],
-              properties: { title: { type: 'string' }, description: { type: 'string' }, timeframe: { type: 'string' } } } },
-            materials: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['name', 'note', 'searchQuery'],
-              properties: { name: { type: 'string' }, note: { type: 'string' }, searchQuery: { type: 'string' } } } },
-            resources: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['label', 'searchQuery'],
-              properties: { label: { type: 'string' }, searchQuery: { type: 'string' } } } }
-          } }
-      };
-      const prompt = `아래는 원본 이메일과, 그에 대해 사용자가 실행해보기로 선택한 아이디어입니다. 다음 세 가지를 한국어로 작성하세요.\n1) steps: 이 아이디어를 실제로 실행하기 위한 구체적인 단계별 계획표. 4~6단계로 나누고, 각 단계마다 제목(짧게), 설명(한두 문장, 실행 가능하게 구체적으로), 예상 시기(timeframe, 예: "즉시", "1주차", "1개월 내")를 포함하세요.\n2) materials: 이 아이디어를 실행하는 데 구매하거나 준비하면 좋을 재료·도구·서비스를 2~5개. 각 항목에 이름(name), 왜 필요한지 한 줄 설명(note), 그리고 이 재료를 찾을 때 쓸 만한 간단한 검색어(searchQuery, 예: "usb 마이크 초보자용")를 포함하세요. 절대 특정 쇼핑몰 URL이나 상품명을 지어내지 마세요, 검색어만 제안하세요.\n3) resources: 참고하면 좋을 사이트 유형이나 주제를 2~4개. 각 항목에 짧은 설명(label)과 검색어(searchQuery)를 포함하세요. 마찬가지로 특정 URL을 지어내지 말고 검색어만 제안하세요.\n\n원본 이메일: ${JSON.stringify(email)}\n\n선택한 아이디어: ${idea}`;
-      const plan = parseJson(await openai(prompt, planFormat));
-      vault[id].plans[idea] = { ...plan, generatedAt: new Date().toISOString() };
-      saveJson('ideas.json', vault);
-      return send(res, 200, { ...plan, cached: false });
-    }
-    if (url.pathname === '/api/plan-chat' && req.method === 'POST') {
-      if (!env.OPENAI_API_KEY) throw new Error('.env에 OPENAI_API_KEY를 입력하세요.');
-      const { id, idea, question } = await requestBody(req);
-      const plan = readJson('ideas.json', {})[id]?.plans?.[idea];
-      if (!plan || !question) throw new Error('계획 또는 질문을 찾을 수 없습니다.');
-      const answer = await openai(`아래는 사용자가 세운 실행 계획표입니다. 이 계획 내용(단계, 재료, 참고 자료)만 근거로 사용자의 질문에 한국어로 답하세요. 계획에 없는 내용은 모른다고 솔직히 말하세요.\n\n아이디어: ${idea}\n\n계획표: ${JSON.stringify(plan)}\n\n질문: ${question}`);
-      return send(res, 200, { answer });
-    }
-    if (url.pathname === '/api/idea-vault') {
-      const vault = readJson('ideas.json', {});
-      const list = Object.entries(vault).map(([id, v]) => ({ id, ...v })).sort((a, b) => (a.generatedAt < b.generatedAt ? 1 : -1));
-      return send(res, 200, { items: list });
-    }
-    const file = url.pathname === '/' ? 'public/index.html' : `public${url.pathname}`;
-    const full = join(root, file); if (!full.startsWith(join(root, 'public')) || !existsSync(full)) return send(res, 404, { error: '찾을 수 없습니다.' });
-    const types = { '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript' }; return send(res, 200, readFileSync(full, 'utf8'), types[extname(full)] || 'text/plain');
-  } catch (error) { return send(res, 400, { error: error.message || '요청을 처리하지 못했습니다.' }); }
+    await navigator.clipboard.writeText(btn.dataset.code);
+    const original = btn.textContent;
+    btn.textContent = '복사했어요';
+    setTimeout(() => { btn.textContent = original; }, 1500);
+  } catch { /* 클립보드 접근 실패는 조용히 무시 */ }
 });
-server.listen(port, () => console.log(`Gmail AI Inbox: http://127.0.0.1:${port}`));
+
+function memoSlip(e, i = 0) {
+  return `<article class="memo-slip" data-id="${e.id}" style="--stagger:${Math.min(i, 14)}">
+    <div class="memo-head"><span class="memo-icon">TEL</span><span class="memo-title">부재중 전화 메모</span></div>
+    <dl class="memo-fields">
+      <dt>발신</dt><dd title="${esc(e.from)}">${esc(e.from)}</dd>
+      <dt>날짜</dt><dd>${esc(e.date)}</dd>
+    </dl>
+    <p class="memo-msg">${esc(e.summary || e.snippet)}</p>
+    ${e.action ? `<p class="memo-action">▸ ${esc(e.action)}</p>` : ''}
+  </article>`;
+}
+
+function renderCalls() {
+  const list = emails.filter(e => e.isCallSummary);
+  $('#callMemos').innerHTML = list.length
+    ? list.map((e, i) => memoSlip(e, i)).join('')
+    : '<p class="empty">아직 통화 요약 메일이 없어요. 에이닷 등에서 통화 요약이 오면 여기에 자동으로 모여요.</p>';
+  document.querySelectorAll('#callMemos .memo-slip').forEach(el => el.onclick = () => openMail(el.dataset.id, false));
+}
+
+function senderCard(g, i = 0) {
+  const initial = (g.fromName || g.fromEmail || '?').trim().charAt(0).toUpperCase();
+  return `<article class="sender-card" data-email="${esc(g.fromEmail)}" style="--stagger:${Math.min(i, 14)}">
+    <div class="sender-avatar">${esc(initial)}</div>
+    <div class="sender-info">
+      <h3>${esc(g.fromName)}</h3>
+      <p class="sender-email">${esc(g.fromEmail)}</p>
+    </div>
+    <div class="sender-meta">
+      <span class="badge">메일 ${g.emails.length}건</span>
+      ${g.attachmentCount ? `<span class="badge attach-badge">📎 ${g.attachmentCount}</span>` : ''}
+      ${g.hasImportant ? '<span class="badge" style="color:var(--burgundy);background:var(--burgundy-tint)">중요 있음</span>' : ''}
+    </div>
+  </article>`;
+}
+
+function renderSenders() {
+  const { senders } = window.__sendersCache || {};
+  const list = senders || [];
+  $('#sendersList').innerHTML = list.length
+    ? list.map((g, i) => senderCard(g, i)).join('')
+    : '<p class="empty">아직 분석한 메일이 없습니다. "최근 30개 분석"을 눌러보세요.</p>';
+  document.querySelectorAll('.sender-card').forEach(el => el.onclick = () => openSenderThread(el.dataset.email));
+}
+
+async function loadSenders() {
+  window.__sendersCache = await api('/api/senders');
+  renderSenders();
+}
+
+function openSenderThread(email) {
+  const group = (window.__sendersCache?.senders || []).find(g => g.fromEmail === email);
+  if (!group) return;
+  const list = [...group.emails].sort((a, b) => (a.date < b.date ? 1 : -1));
+  $('#meta').textContent = `${group.fromName} · 메일 ${list.length}건`;
+  $('#subject').textContent = `${group.fromName}님과 주고받은 메일`;
+  $('#emailSummary').textContent = '';
+  $('#details').innerHTML = list.map(e => `
+    <div class="thread-item" data-id="${e.id}">
+      <dt>${esc(e.date)}</dt>
+      <dd>${esc(e.subject)} ${e.attachments?.length ? `<span class="badge attach-badge">📎 ${e.attachments.length}</span>` : ''}</dd>
+    </div>`).join('');
+  $('#answer').textContent = '';
+  $('#question').value = '';
+  $('#draftBox').hidden = true;
+  $('#costNote').hidden = true;
+  $('#sendRow').hidden = true;
+  $('#ideasList').innerHTML = '';
+  $('#ideasNote').textContent = '';
+  document.querySelectorAll('.tone-btn').forEach(b => b.classList.remove('active'));
+  $('#modal').showModal();
+  playFlap('modal');
+  document.querySelectorAll('.thread-item').forEach(el => el.onclick = () => openMail(el.dataset.id, false));
+}
+
+function attachmentRow(a, i = 0) {
+  const url = `/api/attachment?messageId=${encodeURIComponent(a.messageId)}&attachmentId=${encodeURIComponent(a.attachmentId)}&filename=${encodeURIComponent(a.filename)}`;
+  const sizeKb = a.size ? `${Math.round(a.size / 1024)}KB` : '';
+  return `<a class="attachment-item" href="${url}" style="--stagger:${Math.min(i, 14)}">
+    <span class="attach-icon">📎</span>
+    <div class="attach-info">
+      <span class="attach-name">${esc(a.filename)}</span>
+      <span class="attach-meta">${esc(a.fromName || a.from)} · ${esc(a.subject)} ${sizeKb ? '· ' + sizeKb : ''}</span>
+    </div>
+    <span class="attach-download">다운로드</span>
+  </a>`;
+}
+
+async function loadAttachments() {
+  const { attachments } = await api('/api/attachments');
+  $('#attachmentsList').innerHTML = attachments.length
+    ? attachments.map((a, i) => attachmentRow(a, i)).join('')
+    : '<p class="empty">아직 첨부파일이 있는 메일이 없습니다.</p>';
+}
+
+function render() {
+  renderSummary();
+  renderInbox();
+  renderBiz();
+  renderAuth();
+  renderCalls();
+  renderSchedule();
+  loadSenders();
+  loadAttachments();
+  document.querySelectorAll('#emails .mail').forEach(el => el.onclick = () => openMail(el.dataset.id, false));
+}
+
+function openMail(id, bizMode) {
+  selected = emails.find(e => e.id === id);
+  $('#meta').textContent = `${selected.from} · ${selected.date}`;
+  $('#subject').textContent = selected.subject;
+  $('#emailSummary').textContent = selected.summary;
+  const attachHtml = (selected.attachments || []).length
+    ? `<dt>첨부파일</dt><dd>${selected.attachments.map(a => `<a class="chip" href="/api/attachment?messageId=${encodeURIComponent(selected.id)}&attachmentId=${encodeURIComponent(a.attachmentId)}&filename=${encodeURIComponent(a.filename)}">📎 ${esc(a.filename)}</a>`).join(' ')}</dd>`
+    : '';
+  $('#details').innerHTML = `
+    <dt>유형</dt><dd>${esc(selected.category || '-')}${selected.isCallSummary ? ' · 통화요약' : ''}</dd>
+    <dt>중요 이유</dt><dd>${esc(selected.reason || '-')}</dd>
+    <dt>할 일</dt><dd>${esc(selected.action || '-')}</dd>
+    <dt>기한</dt><dd>${esc(selected.dueDate || '-')}</dd>
+    ${attachHtml}`;
+  $('#answer').textContent = '';
+  $('#question').value = '';
+  $('#draftBox').hidden = true;
+  $('#draftText').value = '';
+  $('#draftStatus').textContent = ''; $('#draftStatus').className = 'draft-status';
+  $('#costNote').hidden = true;
+  $('#sendRow').hidden = true;
+  $('#ideasList').innerHTML = '';
+  $('#ideasNote').textContent = '';
+  document.querySelectorAll('.tone-btn').forEach(b => b.classList.remove('active'));
+  $('#modal').showModal();
+  playFlap('modal');
+  if (bizMode) makeDraft('business');
+}
+
+let currentTone = null;
+async function makeDraft(tone) {
+  currentTone = tone;
+  document.querySelectorAll('.tone-btn').forEach(b => b.classList.toggle('active', b.dataset.tone === tone));
+  $('#draftBox').hidden = false;
+  $('#draftStatus').textContent = '초안 작성 중…';
+  $('#draftText').value = '';
+  try {
+    const { draft, category } = await api('/api/draft', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: selected.id, tone }) });
+    $('#draftText').value = draft;
+    $('#draftStatus').textContent = '';
+    $('#costNote').hidden = category !== '견적요청';
+    $('#sendRow').hidden = tone !== 'business';
+  } catch (e) { $('#draftStatus').textContent = e.message; }
+}
+
+async function sendMailNow() {
+  if (!selected) return;
+  const text = $('#draftText').value.trim();
+  if (!text) { alert('보낼 내용이 비어 있어요. 먼저 답장을 작성해주세요.'); return; }
+  const to = selected.from;
+  const subject = /^re:/i.test(selected.subject || '') ? selected.subject : `Re: ${selected.subject || ''}`;
+
+  if (!confirm(`받는사람: ${to}\n제목: ${subject}\n\n이 내용으로 실제 전송을 진행할까요? (1/3)`)) return;
+  if (!confirm(`한 번 더 확인할게요. 아래 내용 그대로 보낼까요? (2/3)\n\n──────────\n${text}\n──────────`)) return;
+  if (!confirm('마지막 확인이에요. 전송 후에는 되돌릴 수 없어요. 정말 전송할까요? (3/3)')) return;
+
+  const b = $('#sendMail');
+  b.disabled = true; b.textContent = '전송 중…';
+  const status = $('#draftStatus');
+  status.textContent = ''; status.className = 'draft-status';
+  try {
+    await api('/api/send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: selected.id, body: text }) });
+    status.textContent = '실제로 전송했어요.'; status.className = 'draft-status success';
+    saveStyleSample(text, selected.category || '기타');
+  } catch (e) {
+    status.textContent = `전송 실패: ${e.message}`; status.className = 'draft-status error';
+  } finally {
+    b.disabled = false; b.textContent = '지금 전송하기';
+  }
+}
+$('#sendMail').onclick = sendMailNow;
+
+$('#getIdeas').onclick = async () => {
+  const b = $('#getIdeas');
+  b.disabled = true; b.textContent = '아이디어 생각 중…';
+  $('#ideasList').innerHTML = '';
+  $('#ideasNote').textContent = '';
+  try {
+    const { ideas, isBusinessInquiry } = await api('/api/ideas', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: selected.id }) });
+    $('#ideasList').innerHTML = ideas.map(i => `<li data-idea="${esc(i)}" data-mailid="${selected.id}">${esc(i)}</li>`).join('');
+    $('#ideasNote').textContent = (isBusinessInquiry ? '사업 아이디어로 저장됐어요. ' : '') + '항목을 클릭하면 실행 계획표를 짜드려요.';
+    loadVault();
+  } catch (e) { $('#ideasList').innerHTML = `<li class="error">${esc(e.message)}</li>`; }
+  finally { b.disabled = false; b.textContent = '아이디어 제안받기'; }
+};
+
+let currentPlan = { mailId: null, idea: null };
+
+async function openPlan(mailId, ideaText) {
+  currentPlan = { mailId, idea: ideaText };
+  $('#planTitle').textContent = ideaText;
+  $('#planSteps').innerHTML = '<p class="empty">계획표 작성 중…</p>';
+  $('#planMaterials').innerHTML = '';
+  $('#planResources').innerHTML = '';
+  $('#planQuestion').value = '';
+  $('#planAnswer').textContent = '';
+  $('#planModal').showModal();
+  playFlap('planModal');
+  try {
+    const { steps, materials, resources } = await api('/api/idea-plan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: mailId, idea: ideaText }) });
+    $('#planSteps').innerHTML = steps.map((s, i) => `
+      <div class="plan-step">
+        <span class="plan-num">${i + 1}</span>
+        <div class="plan-body">
+          <div class="plan-head"><h4>${esc(s.title)}</h4><span class="plan-time">${esc(s.timeframe)}</span></div>
+          <p>${esc(s.description)}</p>
+        </div>
+      </div>`).join('');
+    if (materials && materials.length) {
+      $('#planMaterials').innerHTML = `<h4 class="plan-extra-title">준비하면 좋을 재료·도구</h4><div class="chip-list">${materials.map(m =>
+        `<a class="chip" target="_blank" rel="noopener" href="https://www.google.com/search?tbm=shop&q=${encodeURIComponent(m.searchQuery)}" title="${esc(m.note)}">${esc(m.name)}</a>`
+      ).join('')}</div>`;
+    }
+    if (resources && resources.length) {
+      $('#planResources').innerHTML = `<h4 class="plan-extra-title">참고하면 좋을 자료</h4><div class="chip-list">${resources.map(r =>
+        `<a class="chip" target="_blank" rel="noopener" href="https://www.google.com/search?q=${encodeURIComponent(r.searchQuery)}">${esc(r.label)}</a>`
+      ).join('')}</div>`;
+    }
+  } catch (e) { $('#planSteps').innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+}
+
+$('#planAsk').onclick = async () => {
+  const q = $('#planQuestion').value.trim();
+  if (!q) return;
+  $('#planAnswer').textContent = '답변 작성 중…';
+  try {
+    $('#planAnswer').textContent = (await api('/api/plan-chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: currentPlan.mailId, idea: currentPlan.idea, question: q }) })).answer;
+  } catch (e) { $('#planAnswer').textContent = e.message; }
+};
+$('#planQuestion').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); $('#planAsk').click(); } });
+document.addEventListener('click', e => {
+  const li = e.target.closest('.ideas-list li[data-idea]');
+  if (li) openPlan(li.dataset.mailid, li.dataset.idea);
+});
+$('#closePlan').onclick = () => $('#planModal').close();
+
+$('#tones').addEventListener('click', e => {
+  const btn = e.target.closest('.tone-btn');
+  if (btn) makeDraft(btn.dataset.tone);
+});
+$('#redraft').onclick = () => { if (currentTone) makeDraft(currentTone); };
+$('#copyDraft').onclick = async () => {
+  try {
+    await navigator.clipboard.writeText($('#draftText').value);
+    $('#draftStatus').textContent = '복사했어요. Gmail에 붙여넣기 하세요.';
+    saveStyleSample($('#draftText').value, selected.category || '기타');
+  } catch { $('#draftStatus').textContent = '복사에 실패했어요. 직접 선택해 복사해주세요.'; }
+};
+
+async function saveStyleSample(text, category) {
+  try {
+    const { store } = await api('/api/style', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, category }) });
+    renderStyleCounts(store);
+  } catch { /* 학습 저장 실패는 조용히 무시 */ }
+}
+function renderStyleCounts(store) {
+  const cats = ['단순질문', '견적요청', '현장방문요청', '미팅요청', '기타'];
+  $('#styleCounts').innerHTML = cats.map(c => `<span class="chip">${esc(c)} · ${(store[c] || []).length}개</span>`).join('');
+}
+
+$('#styleBtn').onclick = async () => {
+  $('#stylePanel').hidden = false;
+  try { renderStyleCounts((await api('/api/style')).store); } catch {}
+};
+$('#closeStyle').onclick = () => { $('#stylePanel').hidden = true; };
+$('#addStyle').onclick = async () => {
+  const text = $('#styleInput').value.trim();
+  const category = $('#styleCategory').value;
+  if (text.length < 10) { alert('조금 더 긴 예시를 붙여넣어주세요.'); return; }
+  await saveStyleSample(text, category);
+  $('#styleInput').value = '';
+};
+$('#resetStyle').onclick = async () => {
+  const { store } = await api('/api/style/reset', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  renderStyleCounts(store);
+};
+
+function switchView(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.view === name));
+  $('#view-inbox').hidden = name !== 'inbox';
+  $('#view-senders').hidden = name !== 'senders';
+  $('#view-business').hidden = name !== 'business';
+  $('#view-attachments').hidden = name !== 'attachments';
+  $('#view-auth').hidden = name !== 'auth';
+  $('#view-calls').hidden = name !== 'calls';
+  $('#view-schedule').hidden = name !== 'schedule';
+  $('#view-vault').hidden = name !== 'vault';
+  if (name === 'vault') loadVault();
+  if (name === 'senders') loadSenders();
+  if (name === 'attachments') loadAttachments();
+}
+
+async function loadVault() {
+  const { items } = await api('/api/idea-vault');
+  $('#vault').innerHTML = items.length ? items.map(v => `
+    <article class="vault-card${v.isBusinessInquiry ? ' biz' : ''}">
+      <div class="vault-head">
+        ${v.isBusinessInquiry ? '<span class="badge biz-badge">사업 아이디어</span>' : ''}
+        <h3>${esc(v.subject)}</h3>
+        <p class="from">${esc(v.from)}</p>
+      </div>
+      <ul class="ideas-list">${v.ideas.map(i => `<li data-idea="${esc(i)}" data-mailid="${esc(v.id)}">${esc(i)}</li>`).join('')}</ul>
+    </article>`).join('') : '<p class="empty">메일 상세에서 "아이디어 제안받기"를 누르면 여기에 모여요. 사업 제안 메일은 더 넓고 기발한 아이디어로 정리돼요.</p>';
+}
+
+async function load() {
+  const status = await api('/api/status');
+  $('#status').textContent = !status.configReady
+    ? `.env에서 다음 값을 입력하세요: ${status.missingConfig.join(', ')}`
+    : status.gmailConnected
+      ? 'Gmail이 읽기 전용으로 연결되었습니다.'
+      : 'Gmail 연결을 완료하세요.';
+  emails = (await api('/api/emails')).emails;
+  render();
+  try { renderStyleCounts((await api('/api/style')).store); } catch {}
+}
+
+$('#tabs').addEventListener('click', e => {
+  const tab = e.target.closest('.tab');
+  if (tab) switchView(tab.dataset.view);
+});
+
+$('#sync').onclick = async () => {
+  const b = $('#sync');
+  b.disabled = true; b.textContent = 'AI가 분석 중…';
+  $('#adFilterNote').hidden = true;
+  try {
+    const result = await api('/api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"limit":30}' });
+    emails = result.emails;
+    render();
+    if (result.adFilteredCount > 0) {
+      $('#adFilterNote').textContent = `광고로 보이는 메일 ${result.adFilteredCount}건은 자동으로 제외했어요.`;
+      $('#adFilterNote').hidden = false;
+    }
+  } catch (e) { alert(e.message); }
+  finally { b.disabled = false; b.textContent = '최근 30개 분석'; }
+};
+
+$('#notifyTelegram').onclick = async () => {
+  const b = $('#notifyTelegram');
+  b.disabled = true; b.textContent = '보내는 중…';
+  try {
+    await api('/api/notify-telegram', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    b.textContent = '보냈어요';
+    setTimeout(() => { b.textContent = '텔레그램 알림 보내기'; }, 2200);
+  } catch (e) {
+    alert(e.message);
+    b.textContent = '텔레그램 알림 보내기';
+  } finally {
+    b.disabled = false;
+  }
+};
+
+$('#ask').onclick = async () => {
+  const q = $('#question').value.trim();
+  if (!q) return;
+  $('#answer').textContent = '답변 작성 중…';
+  try {
+    $('#answer').textContent = (await api('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: selected.id, question: q }) })).answer;
+  } catch (e) { $('#answer').textContent = e.message; }
+};
+$('#question').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); $('#ask').click(); } });
+$('#styleInput').addEventListener('keydown', e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); $('#addStyle').click(); } });
+
+$('#weeklySummary').onclick = async () => {
+  const b = $('#weeklySummary');
+  b.disabled = true; b.textContent = '요약 작성 중…';
+  $('#reportPanel').hidden = false;
+  $('#reportText').textContent = '';
+  try {
+    const { report } = await api('/api/weekly-summary', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    $('#reportText').textContent = report;
+  } catch (e) { $('#reportText').textContent = e.message; }
+  finally { b.disabled = false; b.textContent = '이번 주 요약'; }
+};
+$('#closeReport').onclick = () => { $('#reportPanel').hidden = true; };
+$('#close').onclick = () => $('#modal').close();
+
+load().catch(e => $('#status').textContent = e.message);
