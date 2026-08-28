@@ -26,6 +26,8 @@ async function api(path, options) {
   return data;
 }
 
+const nextActionLabel = { '답장필요': '답장필요', '견적작성': '견적작성', '일정확인': '일정확인', '완료': '완료', '해당없음': '' };
+
 function mailCard(e, i = 0) {
   return `<article class="mail ${e.importance}" data-id="${e.id}" style="--stagger:${Math.min(i, 14)}">
     <div class="badges">
@@ -33,6 +35,8 @@ function mailCard(e, i = 0) {
       ${e.isCallSummary ? '<span class="badge call-badge">통화요약</span>' : ''}
       ${e.category && e.category !== '기타' ? `<span class="badge cat-badge">${esc(e.category)}</span>` : ''}
       ${e.attachments && e.attachments.length ? `<span class="badge attach-badge">📎 ${e.attachments.length}</span>` : ''}
+      ${e.nextAction && nextActionLabel[e.nextAction] ? `<span class="badge next-badge">${esc(nextActionLabel[e.nextAction])}</span>` : ''}
+      ${e.assignee ? `<span class="badge assignee-badge">👤 ${esc(e.assignee)}</span>` : ''}
     </div>
     <h3>${esc(e.subject)}</h3>
     <p class="from">${esc(e.from)}</p>
@@ -262,6 +266,13 @@ function render() {
   document.querySelectorAll('#emails .mail').forEach(el => el.onclick = () => openMail(el.dataset.id, false));
 }
 
+let staffList = [];
+async function loadStaff() {
+  try { staffList = (await api('/api/staff')).staff; } catch { staffList = []; }
+  const opts = ['<option value="">지정 안 함</option>', ...staffList.map(n => `<option value="${esc(n)}">${esc(n)}</option>`), '<option value="__add__">+ 새 담당자 추가</option>'].join('');
+  $('#assigneeSelect').innerHTML = opts;
+}
+
 function openMail(id, bizMode) {
   selected = emails.find(e => e.id === id);
   $('#meta').textContent = `${selected.from} · ${selected.date}`;
@@ -276,6 +287,8 @@ function openMail(id, bizMode) {
     <dt>할 일</dt><dd>${esc(selected.action || '-')}</dd>
     <dt>기한</dt><dd>${esc(selected.dueDate || '-')}</dd>
     ${attachHtml}`;
+  $('#assigneeSelect').value = selected.assignee || '';
+  $('#nextActionSelect').value = selected.nextAction || '해당없음';
   $('#answer').textContent = '';
   $('#question').value = '';
   $('#draftBox').hidden = true;
@@ -290,6 +303,29 @@ function openMail(id, bizMode) {
   playFlap('modal');
   if (bizMode) makeDraft('business');
 }
+
+async function saveAssignment() {
+  if (!selected) return;
+  let assignee = $('#assigneeSelect').value;
+  if (assignee === '__add__') {
+    const name = prompt('새 담당자 이름을 입력하세요');
+    if (!name || !name.trim()) { $('#assigneeSelect').value = selected.assignee || ''; return; }
+    try { await api('/api/staff', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim() }) }); } catch {}
+    await loadStaff();
+    assignee = name.trim();
+    $('#assigneeSelect').value = assignee;
+  }
+  const nextAction = $('#nextActionSelect').value;
+  try {
+    const { email } = await api('/api/assign', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: selected.id, assignee, nextAction }) });
+    const idx = emails.findIndex(e => e.id === selected.id);
+    if (idx !== -1) emails[idx] = email;
+    selected = email;
+    render();
+  } catch { /* 저장 실패는 조용히 무시 */ }
+}
+$('#assigneeSelect').addEventListener('change', saveAssignment);
+$('#nextActionSelect').addEventListener('change', saveAssignment);
 
 let currentTone = null;
 async function makeDraft(tone) {
@@ -439,8 +475,48 @@ $('#resetStyle').onclick = async () => {
   renderStyleCounts(store);
 };
 
+function todayGroup(title, list, note) {
+  if (!list.length) return '';
+  return `<div class="today-group"><h4>${esc(title)} · ${list.length}건</h4><div class="emails">${list.map((e, i) => mailCard(e, i)).join('')}</div></div>`;
+}
+
+async function loadToday() {
+  const data = await api('/api/today');
+  const parts = [
+    todayGroup('⏰ 기한 지남', data.overdue),
+    todayGroup('📌 오늘까지', data.dueToday),
+    todayGroup('✉️ 답장 대기', data.needsReply),
+    todayGroup('💰 견적 작성 대기', data.needsQuote),
+    todayGroup('👤 내 담당 업무', data.myTasks)
+  ].filter(Boolean);
+  $('#todayDashboard').innerHTML = parts.length
+    ? parts.join('')
+    : '<p class="empty">오늘 처리할 급한 일이 없어요. "최근 30개 분석"을 눌러 메일을 불러와보세요.</p>';
+  document.querySelectorAll('#todayDashboard .mail').forEach(el => el.onclick = () => openMail(el.dataset.id, false));
+}
+
+$('#searchBtn').onclick = async () => {
+  const q = $('#searchInput').value.trim();
+  if (!q) return;
+  const b = $('#searchBtn');
+  b.disabled = true; b.textContent = '검색 중…';
+  $('#searchPanel').hidden = false;
+  $('#searchAnswer').textContent = '';
+  $('#searchResults').innerHTML = '';
+  try {
+    const { answer, emails: found } = await api('/api/search', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: q }) });
+    $('#searchAnswer').textContent = answer;
+    $('#searchResults').innerHTML = found.map((e, i) => mailCard(e, i)).join('');
+    document.querySelectorAll('#searchResults .mail').forEach(el => el.onclick = () => openMail(el.dataset.id, false));
+  } catch (e) { $('#searchAnswer').textContent = e.message; }
+  finally { b.disabled = false; b.textContent = '검색'; }
+};
+$('#searchInput').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); $('#searchBtn').click(); } });
+$('#closeSearch').onclick = () => { $('#searchPanel').hidden = true; };
+
 function switchView(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.view === name));
+  $('#view-today').hidden = name !== 'today';
   $('#view-inbox').hidden = name !== 'inbox';
   $('#view-senders').hidden = name !== 'senders';
   $('#view-business').hidden = name !== 'business';
@@ -452,6 +528,7 @@ function switchView(name) {
   if (name === 'vault') loadVault();
   if (name === 'senders') loadSenders();
   if (name === 'attachments') loadAttachments();
+  if (name === 'today') loadToday();
 }
 
 async function loadVault() {
@@ -476,6 +553,8 @@ async function load() {
       : 'Gmail 연결을 완료하세요.';
   emails = (await api('/api/emails')).emails;
   render();
+  loadToday();
+  loadStaff();
   try { renderStyleCounts((await api('/api/style')).store); } catch {}
 }
 
