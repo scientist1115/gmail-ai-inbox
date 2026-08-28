@@ -469,6 +469,31 @@ main .button.primary:hover,dialog .button.primary:hover{background:var(--navy-so
 }
 .mail .attach-badge, .sender-meta .attach-badge{color:var(--brass-deep)!important;background:var(--ochre-tint);border-color:transparent!important}
 
+/* ---------- Search ---------- */
+.search-row{
+  max-width:960px;margin:14px auto 0;display:flex;gap:8px;
+}
+.search-input{
+  flex:1;padding:11px 14px;border:1.5px solid rgba(201,154,92,.4);border-radius:3px;
+  background:rgba(255,255,255,.06);color:var(--paper);font-family:var(--font-body);font-size:.9rem;
+}
+.search-input::placeholder{color:#8d97ad}
+.search-input:focus{outline:none;border-color:var(--brass-bright);background:rgba(255,255,255,.1)}
+
+/* ---------- Today dashboard ---------- */
+.today-group{margin-bottom:26px}
+.today-group h4{
+  font-family:var(--font-mono);font-size:.78rem;letter-spacing:.05em;
+  color:var(--brass-deep);display:inline-block;border:1px solid var(--brass);
+  border-radius:50px;padding:5px 14px;margin:0 0 12px;
+}
+.today-group .emails{gap:8px}
+.next-badge{color:var(--navy)!important;background:#e7eaf0;border-color:transparent!important}
+.assignee-badge{color:var(--sage)!important;background:var(--sage-tint);border-color:transparent!important}
+
+/* ---------- Assign row ---------- */
+.assign-row{display:flex;gap:10px;align-items:center;margin:10px 0}
+
 /* ---------- Vault ---------- */
 .vault{display:grid;gap:16px}
 .vault-card{
@@ -625,6 +650,7 @@ label{font-size:.85rem;color:var(--ink-soft)}
   .brand-seal-glyph{width:22px}
   .stamp{width:56px;height:56px}
   .actions{margin-top:18px}
+  .search-row{flex-direction:column}
   .summary{grid-template-columns:1fr}
   .mail{grid-template-columns:1fr}
   .mail .badge{grid-column:1;grid-row:auto;justify-self:start}
