@@ -36,10 +36,23 @@
     <button id="weeklySummary" class="button ghost">이번 주 요약</button>
     <button id="styleBtn" class="button ghost">내 답장 스타일</button>
   </div>
+  <div class="search-row">
+    <input id="searchInput" class="search-input" placeholder="예: 작년 이 현장 견적 얼마였지? / 답변 안 한 고객 찾아줘">
+    <button id="searchBtn" class="button primary">검색</button>
+  </div>
   <p id="adFilterNote" class="ad-filter-note" hidden></p>
 </header>
 
 <main>
+  <section id="searchPanel" class="report-panel" hidden>
+    <div class="report-head">
+      <h2>검색 결과</h2>
+      <button id="closeSearch" class="close" aria-label="닫기">×</button>
+    </div>
+    <p id="searchAnswer" class="report-text"></p>
+    <div id="searchResults" class="emails" style="margin-top:14px"></div>
+  </section>
+
   <section id="reportPanel" class="report-panel" hidden>
     <div class="report-head">
       <h2>이번 주 요약</h2>
@@ -75,7 +88,8 @@
   <section id="summary" class="summary"></section>
 
   <nav class="tabs" id="tabs">
-    <button class="tab active" data-view="inbox">편지함</button>
+    <button class="tab active" data-view="today">오늘의 업무</button>
+    <button class="tab" data-view="inbox">편지함</button>
     <button class="tab" data-view="senders">발신자별</button>
     <button class="tab" data-view="business">업무 메일</button>
     <button class="tab" data-view="attachments">첨부파일</button>
@@ -85,7 +99,12 @@
     <button class="tab" data-view="vault">아이디어 보관함</button>
   </nav>
 
-  <section id="view-inbox" class="view">
+  <section id="view-today" class="view">
+    <p class="hint" style="margin-bottom:14px">출근하면 이 화면부터 확인하세요. 기한이 지났거나 오늘까지인 일, 아직 답장 안 한 문의, 견적 작성 대기 건이 모여요.</p>
+    <div id="todayDashboard"></div>
+  </section>
+
+  <section id="view-inbox" class="view" hidden>
     <div id="emails" class="emails"><p class="empty">아직 분석한 메일이 없습니다. "최근 30개 분석"을 눌러보세요.</p></div>
   </section>
 
@@ -136,6 +155,19 @@
   <h2 id="subject"></h2>
   <p id="emailSummary" class="lede"></p>
   <dl id="details"></dl>
+  <div class="assign-row">
+    <label for="assigneeSelect" class="hint" style="margin:0">담당자</label>
+    <select id="assigneeSelect" class="cat-select" style="width:auto;flex:1">
+      <option value="">지정 안 함</option>
+    </select>
+    <select id="nextActionSelect" class="cat-select" style="width:auto;flex:1">
+      <option value="답장필요">답장필요</option>
+      <option value="견적작성">견적작성</option>
+      <option value="일정확인">일정확인</option>
+      <option value="완료">완료</option>
+      <option value="해당없음">해당없음</option>
+    </select>
+  </div>
   <hr>
   <label>이 메일에서 아이디어 얻기</label>
   <p class="hint">내용을 바탕으로 AI가 다음 행동을 제안해요</p>
