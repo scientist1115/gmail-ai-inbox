@@ -112,13 +112,13 @@ async function syncAndAnalyze(limit) {
     const message = await gmail(`messages/${item.id}?format=full`);
     emails.push({ id: item.id, threadId: message.threadId, from: header(message.payload.headers, 'From'), fromEmail: normalizeEmailAddress(header(message.payload.headers, 'From')), fromName: extractDisplayName(header(message.payload.headers, 'From')), subject: header(message.payload.headers, 'Subject') || '(제목 없음)', date: header(message.payload.headers, 'Date'), messageIdHeader: header(message.payload.headers, 'Message-ID'), snippet: message.snippet || '', body: cleanText(partText(message.payload)), attachments: collectAttachments(message.payload) });
   }
-  const prompt = `당신은 회사 업무용 이메일 비서입니다. 다음 Gmail 메일들을 분석하세요. 각 메일에 대해:\n- importance: important, normal, low 중 하나\n- 한국어 1~2문장 요약(summary), 중요 이유(reason), 필요한 행동(action), 기한(dueDate: 없으면 빈 문자열)\n- isBusinessInquiry: 사업 제안·의뢰·협업·투자·거래 제안 여부(boolean)\n- category: 이 메일의 성격을 "단순질문", "견적요청", "현장방문요청", "미팅요청", "기타" 중 하나로 분류\n- isCallSummary: 통화 요약 서비스(예: 에이닷, AI 전화)가 자동으로 보낸 통화 요약/통화 기록 메일인지 여부(boolean). 발신자나 제목에 "에이닷", "통화 요약", "통화 기록", "AI 전화" 같은 표현이 있으면 true로 판단하세요.\n- isAd: 마케팅 목적의 대량 발송 프로모션, 할인/이벤트 안내, 뉴스레터, 구독 유도, 광고성 스팸 메일인지 여부(boolean). 실제 고객·거래처가 보낸 견적 요청, 업무 문의, 미팅·현장방문 요청, 통화 요약, 사람이 직접 작성한 메일은 광고가 아니므로 반드시 false로 판단하세요. 애매하면 false로 판단하세요.\n- isVerification: 로그인/본인확인/2단계 인증(2FA)/회원가입/비밀번호 재설정 등을 위해 서비스가 자동 발송한 "인증번호" 또는 "인증 코드" 메일인지 여부(boolean). 숫자나 영숫자로 된 일회용 코드가 포함된 메일만 true로 판단하고, 코드 없이 단순히 "인증이 필요합니다" 안내만 있는 업무 메일은 false로 판단하세요.\n- verificationCode: isVerification이 true인 경우 메일 본문에서 찾은 실제 인증 코드/번호 문자열(숫자·영문 조합 그대로). 찾을 수 없거나 isVerification이 false면 빈 문자열.\n광고/뉴스레터는 low, 답장·결제·일정·업무 요청·기한은 중요도를 높게 판단합니다. 반환할 이메일 수와 입력 이메일 수는 반드시 같아야 하며, 각 id를 그대로 사용하세요.\n\n${JSON.stringify(emails)}`;
+  const prompt = `당신은 회사 업무용 이메일 비서입니다. 다음 Gmail 메일들을 분석하세요. 각 메일에 대해:\n- importance: important, normal, low 중 하나\n- 한국어 1~2문장 요약(summary), 중요 이유(reason), 필요한 행동(action), 기한(dueDate: 없으면 빈 문자열)\n- nextAction: 이 메일에 대해 지금 해야 할 다음 행동을 "답장필요", "견적작성", "일정확인", "완료", "해당없음" 중 하나로 판단하세요. 아직 답장을 안 한 것으로 보이는 문의/요청 메일은 "답장필요", 견적 산정이 필요한 메일은 "견적작성", 방문·미팅 일정 조율이 필요하면 "일정확인", 이미 처리가 끝난 것으로 보이거나 단순 정보성이면 "완료" 또는 "해당없음"으로 판단하세요.\n- isBusinessInquiry: 사업 제안·의뢰·협업·투자·거래 제안 여부(boolean)\n- category: 이 메일의 성격을 "단순질문", "견적요청", "현장방문요청", "미팅요청", "기타" 중 하나로 분류\n- isCallSummary: 통화 요약 서비스(예: 에이닷, AI 전화)가 자동으로 보낸 통화 요약/통화 기록 메일인지 여부(boolean). 발신자나 제목에 "에이닷", "통화 요약", "통화 기록", "AI 전화" 같은 표현이 있으면 true로 판단하세요.\n- isAd: 마케팅 목적의 대량 발송 프로모션, 할인/이벤트 안내, 뉴스레터, 구독 유도, 광고성 스팸 메일인지 여부(boolean). 실제 고객·거래처가 보낸 견적 요청, 업무 문의, 미팅·현장방문 요청, 통화 요약, 사람이 직접 작성한 메일은 광고가 아니므로 반드시 false로 판단하세요. 애매하면 false로 판단하세요.\n- isVerification: 로그인/본인확인/2단계 인증(2FA)/회원가입/비밀번호 재설정 등을 위해 서비스가 자동 발송한 "인증번호" 또는 "인증 코드" 메일인지 여부(boolean). 숫자나 영숫자로 된 일회용 코드가 포함된 메일만 true로 판단하고, 코드 없이 단순히 "인증이 필요합니다" 안내만 있는 업무 메일은 false로 판단하세요.\n- verificationCode: isVerification이 true인 경우 메일 본문에서 찾은 실제 인증 코드/번호 문자열(숫자·영문 조합 그대로). 찾을 수 없거나 isVerification이 false면 빈 문자열.\n광고/뉴스레터는 low, 답장·결제·일정·업무 요청·기한은 중요도를 높게 판단합니다. 반환할 이메일 수와 입력 이메일 수는 반드시 같아야 하며, 각 id를 그대로 사용하세요.\n\n${JSON.stringify(emails)}`;
   const analysisFormat = {
     type: 'json_schema', name: 'email_analysis', strict: true,
     schema: {
       type: 'object', additionalProperties: false, required: ['emails'],
-      properties: { emails: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['id', 'importance', 'summary', 'reason', 'action', 'dueDate', 'isBusinessInquiry', 'category', 'isCallSummary', 'isAd', 'isVerification', 'verificationCode'], properties: {
-        id: { type: 'string' }, importance: { type: 'string', enum: ['important', 'normal', 'low'] }, summary: { type: 'string' }, reason: { type: 'string' }, action: { type: 'string' }, dueDate: { type: 'string' }, isBusinessInquiry: { type: 'boolean' },
+      properties: { emails: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['id', 'importance', 'summary', 'reason', 'action', 'dueDate', 'nextAction', 'isBusinessInquiry', 'category', 'isCallSummary', 'isAd', 'isVerification', 'verificationCode'], properties: {
+        id: { type: 'string' }, importance: { type: 'string', enum: ['important', 'normal', 'low'] }, summary: { type: 'string' }, reason: { type: 'string' }, action: { type: 'string' }, dueDate: { type: 'string' }, nextAction: { type: 'string', enum: ['답장필요', '견적작성', '일정확인', '완료', '해당없음'] }, isBusinessInquiry: { type: 'boolean' },
         category: { type: 'string', enum: ['단순질문', '견적요청', '현장방문요청', '미팅요청', '기타'] }, isCallSummary: { type: 'boolean' }, isAd: { type: 'boolean' }, isVerification: { type: 'boolean' }, verificationCode: { type: 'string' }
       } } }
     }
@@ -126,11 +126,18 @@ async function syncAndAnalyze(limit) {
   };
   const analyses = parseJson(await openai(prompt, analysisFormat)).emails;
   const byId = new Map(analyses.map(a => [a.id, a]));
-  const merged = emails.map(email => ({ ...email, ...(byId.get(email.id) || { importance: 'normal', summary: email.snippet, reason: '', action: '', dueDate: '', isBusinessInquiry: false, category: '기타', isCallSummary: false, isAd: false, isVerification: false, verificationCode: '' }), analyzedAt: new Date().toISOString() }));
+  const merged = emails.map(email => ({ ...email, ...(byId.get(email.id) || { importance: 'normal', summary: email.snippet, reason: '', action: '', dueDate: '', nextAction: '해당없음', isBusinessInquiry: false, category: '기타', isCallSummary: false, isAd: false, isVerification: false, verificationCode: '' }), analyzedAt: new Date().toISOString() }));
   const stored = merged.filter(email => !email.isAd);
   const adFilteredCount = merged.length - stored.length;
-  saveJson('emails.json', stored);
-  return { emails: stored, adFilteredCount };
+  const archive = readJson('emails.json', []);
+  const archiveById = new Map(archive.map(e => [e.id, e]));
+  for (const email of stored) {
+    const prev = archiveById.get(email.id);
+    archiveById.set(email.id, prev ? { ...email, assignee: prev.assignee || '', taskNote: prev.taskNote || '', nextAction: prev.nextActionOverride || email.nextAction } : email);
+  }
+  const mergedArchive = [...archiveById.values()].sort((a, b) => (a.date < b.date ? 1 : -1));
+  saveJson('emails.json', mergedArchive);
+  return { emails: mergedArchive, adFilteredCount };
 }
 function telegramReady() { return Boolean(env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID); }
 function notifySyncResult(stored) {
@@ -213,6 +220,55 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.pathname === '/api/sync' && req.method === 'POST') { if (!configReady()) throw new Error(`.env에서 ${missingConfig().join(', ')} 값을 확인하세요.`); const result = await syncAndAnalyze((await requestBody(req)).limit || 30); return send(res, 200, { emails: result.emails, adFilteredCount: result.adFilteredCount }); }
     if (url.pathname === '/api/emails') return send(res, 200, { emails: readJson('emails.json', []) });
+    if (url.pathname === '/api/assign' && req.method === 'POST') {
+      const { id, assignee, taskNote, nextAction } = await requestBody(req);
+      const list = readJson('emails.json', []);
+      const idx = list.findIndex(e => e.id === id);
+      if (idx === -1) throw new Error('메일을 찾을 수 없습니다.');
+      if (assignee !== undefined) list[idx].assignee = assignee;
+      if (taskNote !== undefined) list[idx].taskNote = taskNote;
+      if (nextAction !== undefined) { list[idx].nextAction = nextAction; list[idx].nextActionOverride = nextAction; }
+      saveJson('emails.json', list);
+      return send(res, 200, { email: list[idx] });
+    }
+    if (url.pathname === '/api/staff' && req.method === 'GET') {
+      return send(res, 200, { staff: readJson('staff.json', []) });
+    }
+    if (url.pathname === '/api/staff' && req.method === 'POST') {
+      const { name } = await requestBody(req);
+      const trimmed = (name || '').trim();
+      if (!trimmed) throw new Error('이름을 입력하세요.');
+      const staff = readJson('staff.json', []);
+      if (!staff.includes(trimmed)) { staff.push(trimmed); saveJson('staff.json', staff); }
+      return send(res, 200, { staff });
+    }
+    if (url.pathname === '/api/today') {
+      const list = readJson('emails.json', []).filter(e => !e.isVerification);
+      const todayKey = new Date().toISOString().slice(0, 10);
+      const parseDue = str => { const t = Date.parse(str); return isNaN(t) ? null : new Date(t).toISOString().slice(0, 10); };
+      const overdue = list.filter(e => { const d = parseDue(e.dueDate); return d && d < todayKey && e.nextAction !== '완료'; });
+      const dueToday = list.filter(e => parseDue(e.dueDate) === todayKey && e.nextAction !== '완료');
+      const needsReply = list.filter(e => e.nextAction === '답장필요' && !overdue.includes(e) && !dueToday.includes(e)).slice(0, 15);
+      const needsQuote = list.filter(e => e.nextAction === '견적작성' && !overdue.includes(e) && !dueToday.includes(e)).slice(0, 15);
+      const myTasks = list.filter(e => e.assignee).sort((a, b) => (a.date < b.date ? 1 : -1));
+      return send(res, 200, { overdue, dueToday, needsReply, needsQuote, myTasks });
+    }
+    if (url.pathname === '/api/search' && req.method === 'POST') {
+      if (!env.OPENAI_API_KEY) throw new Error('.env에 OPENAI_API_KEY를 입력하세요.');
+      const { query } = await requestBody(req);
+      if (!query || !query.trim()) throw new Error('검색어를 입력하세요.');
+      const list = readJson('emails.json', []).filter(e => !e.isVerification);
+      const compact = list.slice(0, 400).map(e => ({ id: e.id, from: e.from, fromName: e.fromName, subject: e.subject, date: e.date, category: e.category, summary: e.summary, snippet: e.snippet, dueDate: e.dueDate, nextAction: e.nextAction, assignee: e.assignee || '', attachments: (e.attachments || []).map(a => a.filename) }));
+      const searchFormat = {
+        type: 'json_schema', name: 'mail_search', strict: true,
+        schema: { type: 'object', additionalProperties: false, required: ['answer', 'relatedIds'],
+          properties: { answer: { type: 'string' }, relatedIds: { type: 'array', items: { type: 'string' } } } }
+      };
+      const prompt = `당신은 회사 이메일 보관함 검색 비서입니다. 아래는 저장된 메일 목록(요약 정보)입니다. 사용자의 자연어 질문에 이 메일 정보만 근거로 한국어로 답하세요. "작년 이 현장 견적 얼마였지?", "이 자재 최근 거래처가 어디야?", "답변 안 한 고객 찾아줘" 같은 질문에 목록을 뒤져서 답합니다. 근거가 부족하면 모른다고 솔직히 말하세요. answer는 2~4문장으로 간결하게 작성하고, relatedIds에는 답변의 근거가 된 메일들의 id를 최대 8개까지 담으세요.\n\n메일 목록: ${JSON.stringify(compact)}\n\n질문: ${query}`;
+      const result = parseJson(await openai(prompt, searchFormat));
+      const relatedEmails = list.filter(e => result.relatedIds.includes(e.id));
+      return send(res, 200, { answer: result.answer, emails: relatedEmails });
+    }
     if (url.pathname === '/api/attachment' && req.method === 'GET') {
       const messageId = url.searchParams.get('messageId');
       const attachmentId = url.searchParams.get('attachmentId');
